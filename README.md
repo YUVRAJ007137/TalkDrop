@@ -1,2 +1,24 @@
-# TalkDrop
-📌 Project: Secure Made-in-India Chat & File Sharing App  A lightweight real-time chat and file-sharing application built with Supabase.  🔐 Privacy First – Password-protected chat rooms & anonymous usernames.  ⚡ Real-Time Messaging – Instant delivery using Supabase real-time features.  📂 File Sharing – Upload and preview images/files seamlessly.  🏠 Made in India – Designed with focus on security, simplicity, and local innovation.  🚀 Future Scope  Integration of tools similar to I Love PDF (PDF editing/merging/splitting).  Integration of tools similar to I Love IMG (image compression/conversion).  Enhanced file management and collaboration features.
+# TalkDrop (MVP)
+
+WhatsApp-inspired real-time chat with file sharing using React (Vite) + Supabase.
+
+## Setup
+
+1. Create a Supabase project.
+2. Create tables using your provided SQL (Users, Rooms, Messages). Ensure `Messages.room_id` has `ON DELETE CASCADE`.
+3. Create a public Storage bucket named `talkdrop-uploads` and enable public access.
+4. Copy `.env.example` to `.env` and fill values.
+
+## Run
+
+```bash
+pnpm install # or npm/yarn
+pnpm dev
+```
+
+Open http://localhost:5173
+
+## Env
+
+- VITE_SUPABASE_URL
+- VITE_SUPABASE_ANON_KEY 
