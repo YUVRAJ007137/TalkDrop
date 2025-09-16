@@ -370,7 +370,7 @@ export default function App() {
 			{activeRoom ? (
 				<ChatView room={activeRoom} me={username} onOpenRooms={() => setShowRooms(true)} />
 			) : (
-				<div className="main"><div className="empty">Join or create a room</div></div>
+				<div className="main"><div className="empty">Join or create a room!</div></div>
 			)}
 		</div>
 	);
