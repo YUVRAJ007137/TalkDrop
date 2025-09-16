@@ -370,7 +370,20 @@ export default function App() {
 			{activeRoom ? (
 				<ChatView room={activeRoom} me={username} onOpenRooms={() => setShowRooms(true)} />
 			) : (
-				<div className="main"><div className="empty">Join or create a room!</div></div>
+				<div className="main">
+					<div className="chat-header">
+						<div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+							<button className="icon-button mobile-only" onClick={() => setShowRooms(true)} aria-label="Open rooms">
+								<svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+									<path d="M3 6h18M3 12h18M3 18h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+								</svg>
+							</button>
+							<span>Welcome</span>
+						</div>
+						<button className="button secondary desktop-only" onClick={() => setShowRooms(true)} aria-label="Open rooms">Rooms</button>
+					</div>
+					<div className="empty">Join or create a room</div>
+				</div>
 			)}
 		</div>
 	);
