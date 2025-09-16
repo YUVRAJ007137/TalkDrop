@@ -106,7 +106,7 @@ function MessageBubble({ me, msg }: { me: string; msg: ChatMessage }) {
 	);
 }
 
-function ChatView({ room, me, onOpenRooms }: { room: Room; me: string; onOpenRooms: () => void }) {
+function ChatView({ room, me, onOpenRooms, onLogout }: { room: Room; me: string; onOpenRooms: () => void; onLogout: () => void }) {
 	const [messages, setMessages] = useState<ChatMessage[]>([]);
 	const [text, setText] = useState('');
 	const [pendingFile, setPendingFile] = useState<File | null>(null);
@@ -223,7 +223,10 @@ function ChatView({ room, me, onOpenRooms }: { room: Room; me: string; onOpenRoo
 					</button>
 					<span>{room.room_name}</span>
 				</div>
-				<button className="button secondary desktop-only" onClick={onOpenRooms} aria-label="Open rooms">Rooms</button>
+				<div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+					<button className="button secondary desktop-only" onClick={onOpenRooms} aria-label="Open rooms">Rooms</button>
+					<button className="button secondary mobile-only" onClick={onLogout} aria-label="Logout">Logout</button>
+				</div>
 			</div>
 			<div className="messages" ref={messagesRef} onScroll={handleMessagesScroll}>
 				{messages.length === 0 && <div className="empty">Say hi 👋</div>}
@@ -368,7 +371,7 @@ export default function App() {
 			/>
 			{showRooms && <div className="backdrop" onClick={() => setShowRooms(false)} />}
 			{activeRoom ? (
-				<ChatView room={activeRoom} me={username} onOpenRooms={() => setShowRooms(true)} />
+				<ChatView room={activeRoom} me={username} onOpenRooms={() => setShowRooms(true)} onLogout={handleLogout} />
 			) : (
 				<div className="main">
 					<div className="chat-header">
@@ -380,7 +383,10 @@ export default function App() {
 							</button>
 							<span>Welcome</span>
 						</div>
-						<button className="button secondary desktop-only" onClick={() => setShowRooms(true)} aria-label="Open rooms">Rooms</button>
+						<div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+							<button className="button secondary desktop-only" onClick={() => setShowRooms(true)} aria-label="Open rooms">Rooms</button>
+							<button className="button secondary mobile-only" onClick={handleLogout} aria-label="Logout">Logout</button>
+						</div>
 					</div>
 					<div className="empty">Join or create a room</div>
 				</div>
