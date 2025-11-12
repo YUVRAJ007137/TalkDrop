@@ -1,6 +1,30 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { RealtimeChannel } from '@supabase/supabase-js';
 import { useLocalStorage } from '../hooks/useLocalStorage';
-import { Room, ChatMessage, parseMessagePayload, makeTextMessage, makeFileMessage } from '../types';
+import { Room, ChatMessage, MessageStatus, parseMessagePayload, makeTextMessage, makeFileMessage } from '../types';
+import { supabase } from '../lib/supabaseClient';
+
+function createClientId(): string {
+	return `client-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function extractClientId(raw: string): string | undefined {
+	try {
+		const parsed = JSON.parse(raw);
+		return typeof parsed?.clientId === 'string' ? parsed.clientId : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function sortMessages(list: ChatMessage[]): ChatMessage[] {
+	return [...list].sort((a, b) => {
+		const timeA = new Date(a.timestamp ?? 0).getTime();
+		const timeB = new Date(b.timestamp ?? 0).getTime();
+		if (timeA === timeB) return a.id - b.id;
+		return timeA - timeB;
+	});
+}
 import { createRoom, deleteRoom, fetchMessages, fetchRoomByName, fetchRooms, sendMessage, subscribeToRoomMessages, uploadFile } from '../lib/api';
 
 function Onboard({ onSet }: { onSet: (name: string) => void }) {
@@ -70,6 +94,28 @@ function RoomsSidebar({ rooms, joinedIds, activeRoomId, onSelect, onCreate, onDe
 	);
 }
 
+function MessageStatusIcon({ status }: { status?: MessageStatus }) {
+	if (!status) return null;
+	if (status === 'sending') {
+		return (
+			<span className="tick-icon" aria-label="Message sending">
+				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+					<path d="M5 13.5l3.5 3.5L19 6.5" stroke="var(--wa-muted)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+				</svg>
+			</span>
+		);
+	}
+	const color = status === 'seen' ? '#53bdeb' : 'var(--wa-muted)';
+	return (
+		<span className={`tick-icon ${status}`} aria-label={status === 'seen' ? 'Message seen' : 'Message delivered'}>
+			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+				<path d="M4 13.5l3.5 3.5L15.5 9" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+				<path d="M9.5 13.5l3.5 3.5L21 9" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+			</svg>
+		</span>
+	);
+}
+
 function MessageBubble({ me, msg }: { me: string; msg: ChatMessage }) {
 	const payload = useMemo(() => parseMessagePayload(msg.message), [msg.message]);
 	const isSelf = msg.username === me;
@@ -101,7 +147,10 @@ function MessageBubble({ me, msg }: { me: string; msg: ChatMessage }) {
 					)}
 				</div>
 			)}
-			<div className="timestamp">{timeIST}</div>
+			<div className="timestamp">
+				<span>{timeIST}</span>
+				{isSelf && <MessageStatusIcon status={msg.status} />}
+			</div>
 		</div>
 	);
 }
@@ -117,6 +166,13 @@ function ChatView({ room, me, onOpenRooms, onLogout }: { room: Room; me: string;
 	const didInitialScrollRef = useRef<boolean>(false);
 	const [isSending, setIsSending] = useState<boolean>(false);
 	const [uploadStatus, setUploadStatus] = useState<string>('');
+	const shouldScrollAfterSendRef = useRef<boolean>(false);
+	const messagesStateRef = useRef<ChatMessage[]>([]);
+	const presenceChannelRef = useRef<RealtimeChannel | null>(null);
+	const presenceReadyRef = useRef<boolean>(false);
+	const pendingPresenceUpdateRef = useRef<number | null>(null);
+	const lastSeenMessageIdRef = useRef<number>(0);
+	const [presenceMap, setPresenceMap] = useState<Record<string, number>>({});
 
 	function normalizeToDate(raw: string | number | null): Date {
 		const rawTs = raw ?? Date.now();
@@ -138,17 +194,96 @@ function ChatView({ room, me, onOpenRooms, onLogout }: { room: Room; me: string;
 		return new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' }).format(display);
 	}
 
+	const enhanceIncomingMessage = useCallback((incoming: ChatMessage): ChatMessage => {
+		const clientId = extractClientId(incoming.message) ?? incoming.clientId;
+		const baseStatus: MessageStatus | undefined =
+			incoming.username === me ? incoming.status ?? 'delivered' : incoming.status;
+		return { ...incoming, clientId, status: baseStatus };
+	}, [me]);
+
+	const mergeIncomingMessage = useCallback((prev: ChatMessage[], incoming: ChatMessage): ChatMessage[] => {
+		const enhanced = enhanceIncomingMessage(incoming);
+		const clientId = enhanced.clientId;
+		if (clientId) {
+			const idx = prev.findIndex((msg) => msg.clientId === clientId);
+			if (idx !== -1) {
+				const existing = prev[idx];
+				const mergedStatus: MessageStatus | undefined =
+					existing.status === 'seen'
+						? 'seen'
+						: existing.status === 'sending'
+							? 'delivered'
+							: enhanced.status ?? existing.status ?? (enhanced.username === me ? 'delivered' : undefined);
+				const next = [...prev];
+				next[idx] = { ...existing, ...enhanced, status: mergedStatus };
+				return sortMessages(next);
+			}
+		}
+		const idxById = prev.findIndex((msg) => msg.id === enhanced.id);
+		if (idxById !== -1) {
+			const existing = prev[idxById];
+			const mergedStatus: MessageStatus | undefined =
+				existing.status === 'seen'
+					? 'seen'
+					: existing.status === 'sending'
+						? 'delivered'
+						: enhanced.status ?? existing.status ?? (enhanced.username === me ? 'delivered' : undefined);
+			const next = [...prev];
+			next[idxById] = { ...existing, ...enhanced, status: mergedStatus };
+			return sortMessages(next);
+		}
+		return sortMessages([...prev, enhanced]);
+	}, [enhanceIncomingMessage, me]);
+
+	const updatePresence = useCallback((lastSeenId: number) => {
+		if (lastSeenId <= 0 || lastSeenId <= lastSeenMessageIdRef.current) {
+			return;
+		}
+		lastSeenMessageIdRef.current = lastSeenId;
+		const channel = presenceChannelRef.current;
+		if (presenceReadyRef.current && channel) {
+			void channel.track({ lastSeenMessageId: lastSeenId });
+			pendingPresenceUpdateRef.current = null;
+		} else {
+			pendingPresenceUpdateRef.current = lastSeenId;
+		}
+	}, []);
+
+	const markAllAsRead = useCallback(() => {
+		const currentMessages = messagesStateRef.current;
+		if (!currentMessages.length) return;
+		const lastServerMessageId = currentMessages.reduce((max, msg) => (msg.id > 0 ? Math.max(max, msg.id) : max), 0);
+		if (lastServerMessageId > 0) {
+			updatePresence(lastServerMessageId);
+		}
+	}, [updatePresence]);
+
 	useEffect(() => {
 		let mounted = true;
-		fetchMessages(room.id).then((m) => mounted && setMessages(m));
-		const unsub = subscribeToRoomMessages(room.id, (m) => setMessages((prev) => [...prev, m]));
+		fetchMessages(room.id).then((list) => {
+			if (!mounted) return;
+			setMessages((prev) => {
+				const mapped = list.map((msg) => enhanceIncomingMessage(msg));
+				let next = [...prev];
+				for (const msg of mapped) {
+					next = mergeIncomingMessage(next, msg);
+				}
+				return sortMessages(next);
+			});
+		});
+		const unsub = subscribeToRoomMessages(room.id, (incoming) => {
+			setMessages((prev) => mergeIncomingMessage(prev, incoming));
+		});
 		return () => { mounted = false; unsub(); };
-	}, [room.id]);
+	}, [room.id, enhanceIncomingMessage, mergeIncomingMessage]);
 
 	// When switching rooms, ensure we do the initial jump-to-bottom again
 	useEffect(() => {
 		didInitialScrollRef.current = false;
 		setIsNearBottom(true);
+		lastSeenMessageIdRef.current = 0;
+		pendingPresenceUpdateRef.current = null;
+		messagesStateRef.current = [];
 	}, [room.id]);
 
 	useEffect(() => {
@@ -158,18 +293,108 @@ function ChatView({ room, me, onOpenRooms, onLogout }: { room: Room; me: string;
 			didInitialScrollRef.current = true;
 			return;
 		}
-		// On subsequent updates, scroll only if near bottom or last message is from me
-		const last = messages[messages.length - 1];
-		if (isNearBottom || (last && last.username === me)) {
+		// On subsequent updates, scroll only if user is near bottom or we just sent a message
+		if (shouldScrollAfterSendRef.current || isNearBottom) {
 			endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+			shouldScrollAfterSendRef.current = false;
 		}
-	}, [messages.length, isNearBottom, me]);
+	}, [messages.length, isNearBottom]);
+
+	useEffect(() => {
+		messagesStateRef.current = messages;
+	}, [messages]);
+
+	useEffect(() => {
+		if (isNearBottom) {
+			markAllAsRead();
+		}
+	}, [isNearBottom, markAllAsRead, messages.length]);
+
+	useEffect(() => {
+		const channel = supabase.channel(`room:${room.id}:presence`, {
+			config: { presence: { key: me } }
+		});
+		presenceChannelRef.current = channel;
+		presenceReadyRef.current = false;
+		setPresenceMap({});
+		channel.on('presence', { event: 'sync' }, () => {
+			const state = channel.presenceState() as Record<string, Array<{ lastSeenMessageId?: number }>>;
+			const next: Record<string, number> = {};
+			for (const [user, sessions] of Object.entries(state)) {
+				const max = sessions.reduce((acc, session) => Math.max(acc, session.lastSeenMessageId ?? 0), 0);
+				next[user] = max;
+			}
+			setPresenceMap(next);
+		});
+		void channel.subscribe(async (status) => {
+			if (status === 'SUBSCRIBED') {
+				presenceReadyRef.current = true;
+				const initial = lastSeenMessageIdRef.current;
+				await channel.track({ lastSeenMessageId: initial });
+				if (pendingPresenceUpdateRef.current && pendingPresenceUpdateRef.current > initial) {
+					const nextValue = pendingPresenceUpdateRef.current;
+					pendingPresenceUpdateRef.current = null;
+					lastSeenMessageIdRef.current = nextValue;
+					await channel.track({ lastSeenMessageId: nextValue });
+				}
+			}
+		});
+		return () => {
+			presenceReadyRef.current = false;
+			pendingPresenceUpdateRef.current = null;
+			presenceChannelRef.current = null;
+			setPresenceMap({});
+			channel.unsubscribe();
+		};
+	}, [room.id, me]);
+
+	useEffect(() => {
+		if (!Object.keys(presenceMap).length) return;
+		setMessages((prev) => {
+			let changed = false;
+			const next = prev.map((msg) => {
+				if (msg.username !== me || msg.status === 'seen' || msg.id <= 0) return msg;
+				const others = Object.entries(presenceMap).filter(([user]) => user !== me);
+				if (!others.length) return msg;
+				const seen = others.every(([, lastSeen]) => (lastSeen ?? 0) >= msg.id);
+				if (!seen) return msg;
+				changed = true;
+				return { ...msg, status: 'seen' as MessageStatus };
+			});
+			return changed ? next : prev;
+		});
+	}, [presenceMap, me]);
 
 	async function handleSend() {
 		const trimmed = text.trim();
 		if (!trimmed && !pendingFile) return;
+		if (trimmed || pendingFile) {
+			shouldScrollAfterSendRef.current = true;
+		}
 		if (trimmed) {
-			await sendMessage(room.id, me, makeTextMessage(trimmed));
+			const clientId = createClientId();
+			const payload = makeTextMessage(trimmed, clientId);
+			const optimisticId = -Math.floor(Date.now() + Math.random() * 1000);
+			const optimisticMessage: ChatMessage = {
+				id: optimisticId,
+				room_id: room.id,
+				username: me,
+				message: payload,
+				timestamp: new Date().toISOString(),
+				status: 'sending',
+				clientId
+			};
+			setMessages((prev) => sortMessages([...prev, optimisticMessage]));
+			try {
+				await sendMessage(room.id, me, payload);
+				setMessages((prev) =>
+					prev.map((msg) => (msg.clientId === clientId && msg.status === 'sending' ? { ...msg, status: 'delivered' } : msg))
+				);
+			} catch (err) {
+				console.error('Failed to send message:', err);
+				setMessages((prev) => prev.filter((msg) => msg.clientId !== clientId));
+				window.alert(`Failed to send message: ${err instanceof Error ? err.message : 'Unknown error'}`);
+			}
 		}
 		if (pendingFile) {
 			setIsSending(true);
@@ -180,7 +405,9 @@ function ChatView({ room, me, onOpenRooms, onLogout }: { room: Room; me: string;
 					uploadFile(pendingFile),
 					new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Upload timed out')), timeoutMs))
 				]);
-				await sendMessage(room.id, me, makeFileMessage(uploaded.url, uploaded.mime, uploaded.name));
+				const clientId = createClientId();
+				const payload = makeFileMessage(uploaded.url, uploaded.mime, uploaded.name, clientId);
+				await sendMessage(room.id, me, payload);
 				setUploadStatus('');
 			} catch (err) {
 				console.error('Upload failed:', err);
@@ -209,7 +436,11 @@ function ChatView({ room, me, onOpenRooms, onLogout }: { room: Room; me: string;
 		const el = messagesRef.current;
 		if (!el) return;
 		const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-		setIsNearBottom(distanceFromBottom < 120);
+		const isBottom = distanceFromBottom < 120;
+		setIsNearBottom(isBottom);
+		if (isBottom) {
+			markAllAsRead();
+		}
 	}
 
 	return (
@@ -223,9 +454,8 @@ function ChatView({ room, me, onOpenRooms, onLogout }: { room: Room; me: string;
 					</button>
 					<span>{room.room_name}</span>
 				</div>
-				<div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-					<button className="button secondary desktop-only" onClick={onOpenRooms} aria-label="Open rooms">Rooms</button>
-					<button className="button secondary mobile-only" onClick={onLogout} aria-label="Logout">Logout</button>
+				<div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+					<button className="button secondary" onClick={onLogout} aria-label="Logout">Logout</button>
 				</div>
 			</div>
 			<div className="messages" ref={messagesRef} onScroll={handleMessagesScroll}>
@@ -371,21 +601,20 @@ export default function App() {
 			/>
 			{showRooms && <div className="backdrop" onClick={() => setShowRooms(false)} />}
 			{activeRoom ? (
-				<ChatView room={activeRoom} me={username} onOpenRooms={() => setShowRooms(true)} onLogout={handleLogout} />
+				<ChatView room={activeRoom} me={username} onOpenRooms={() => setShowRooms((v) => !v)} onLogout={handleLogout} />
 			) : (
 				<div className="main">
 					<div className="chat-header">
 						<div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-							<button className="icon-button mobile-only" onClick={() => setShowRooms(true)} aria-label="Open rooms">
+							<button className="icon-button mobile-only" onClick={() => setShowRooms((v) => !v)} aria-label="Open rooms">
 								<svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
 									<path d="M3 6h18M3 12h18M3 18h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
 								</svg>
 							</button>
-							<span>Welcome</span>
+							<span>TalkDrop</span>
 						</div>
-						<div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-							<button className="button secondary desktop-only" onClick={() => setShowRooms(true)} aria-label="Open rooms">Rooms</button>
-							<button className="button secondary mobile-only" onClick={handleLogout} aria-label="Logout">Logout</button>
+						<div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+							<button className="button secondary" onClick={handleLogout} aria-label="Logout">Logout</button>
 						</div>
 					</div>
 					<div className="empty">Join or create a room</div>
