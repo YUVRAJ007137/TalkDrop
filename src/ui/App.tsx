@@ -3,6 +3,7 @@ import type { RealtimeChannel } from '@supabase/supabase-js';
 import { useLocalStorage } from '../hooks/useLocalStorage';
 import { Room, ChatMessage, MessageStatus, parseMessagePayload, makeTextMessage, makeFileMessage } from '../types';
 import { supabase } from '../lib/supabaseClient';
+import { fetchReadReceipts, upsertReadReceipt } from '../lib/api';
 
 function createClientId(): string {
 	return `client-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -41,13 +42,14 @@ function Onboard({ onSet }: { onSet: (name: string) => void }) {
 	);
 }
 
-function RoomsSidebar({ rooms, joinedIds, activeRoomId, onSelect, onCreate, onDelete, onClose, onJoin, isOpen, username, onLogout }: {
+function RoomsSidebar({ rooms, joinedIds, activeRoomId, onSelect, onCreate, onDelete, onLeave, onClose, onJoin, isOpen, username, onLogout }: {
 	rooms: Room[];
 	joinedIds: number[];
 	activeRoomId: number | null;
 	onSelect: (room: Room) => void;
 	onCreate: (name: string, password?: string | null) => void;
 	onDelete: (roomId: number) => void;
+	onLeave: (roomId: number) => void;
 	onClose: () => void;
 	onJoin: (room: Room) => void;
 	isOpen: boolean;
@@ -74,7 +76,10 @@ function RoomsSidebar({ rooms, joinedIds, activeRoomId, onSelect, onCreate, onDe
 					<div key={r.id} className={`room-item ${activeRoomId === r.id ? 'active' : ''}`} onClick={() => { onSelect(r); onClose(); }}>
 						<div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
 							<span>{r.password ? '🔒 ' : ''}{r.room_name}</span>
-							<button className="button danger" onClick={(e) => { e.stopPropagation(); onDelete(r.id); }}>Delete</button>
+							<div style={{ display: 'flex', gap: 6 }} onClick={(e) => e.stopPropagation()}>
+								<button className="button secondary" onClick={() => onLeave(r.id)} aria-label="Remove from my menu">Remove</button>
+								<button className="button danger" onClick={() => onDelete(r.id)} aria-label="Delete room">Delete</button>
+							</div>
 						</div>
 					</div>
 				))}
@@ -155,7 +160,7 @@ function MessageBubble({ me, msg }: { me: string; msg: ChatMessage }) {
 	);
 }
 
-function ChatView({ room, me, onOpenRooms, onLogout }: { room: Room; me: string; onOpenRooms: () => void; onLogout: () => void }) {
+function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room; me: string; refreshKey: number; onOpenRooms: () => void; onLogout: () => void }) {
 	const [messages, setMessages] = useState<ChatMessage[]>([]);
 	const [text, setText] = useState('');
 	const [pendingFile, setPendingFile] = useState<File | null>(null);
@@ -173,6 +178,7 @@ function ChatView({ room, me, onOpenRooms, onLogout }: { room: Room; me: string;
 	const pendingPresenceUpdateRef = useRef<number | null>(null);
 	const lastSeenMessageIdRef = useRef<number>(0);
 	const [presenceMap, setPresenceMap] = useState<Record<string, number>>({});
+	const { value: seenByAllUpTo, setValue: setSeenByAllUpTo } = useLocalStorage<number>(`td:room:${room.id}:seenByAllUpTo`, 0);
 
 	function normalizeToDate(raw: string | number | null): Date {
 		const rawTs = raw ?? Date.now();
@@ -255,8 +261,25 @@ function ChatView({ room, me, onOpenRooms, onLogout }: { room: Room; me: string;
 		const lastServerMessageId = currentMessages.reduce((max, msg) => (msg.id > 0 ? Math.max(max, msg.id) : max), 0);
 		if (lastServerMessageId > 0) {
 			updatePresence(lastServerMessageId);
+			// Persist to server so read state survives history clears
+			void upsertReadReceipt(room.id, me, lastServerMessageId).catch(() => {});
 		}
 	}, [updatePresence]);
+
+	const applySeenCutoff = useCallback((list: ChatMessage[], cutoffId: number): ChatMessage[] => {
+		if (!cutoffId || cutoffId <= 0) return list;
+		let changed = false;
+		const next = list.map((msg) => {
+			if (msg.username !== me) return msg;
+			if (msg.status === 'seen') return msg;
+			if (msg.id > 0 && msg.id <= cutoffId) {
+				changed = true;
+				return { ...msg, status: 'seen' as MessageStatus };
+			}
+			return msg;
+		});
+		return changed ? next : list;
+	}, [me]);
 
 	useEffect(() => {
 		let mounted = true;
@@ -268,23 +291,42 @@ function ChatView({ room, me, onOpenRooms, onLogout }: { room: Room; me: string;
 				for (const msg of mapped) {
 					next = mergeIncomingMessage(next, msg);
 				}
-				return sortMessages(next);
+				next = sortMessages(next);
+				// Apply persisted seen cutoff so blue ticks remain after refresh
+				next = applySeenCutoff(next, seenByAllUpTo);
+				return next;
 			});
 		});
+		// Fetch server receipts and derive a conservative "seen by all" cutoff from other participants
+		fetchReadReceipts(room.id)
+			.then((receipts) => {
+				const others = receipts.filter((r) => r.username !== me);
+				if (!others.length) return;
+				const minSeenByOthers = Math.min(...others.map((r) => r.last_seen_message_id ?? 0));
+				if (minSeenByOthers > 0 && minSeenByOthers > (seenByAllUpTo ?? 0)) {
+					setSeenByAllUpTo(minSeenByOthers);
+					setMessages((prev) => applySeenCutoff(prev, minSeenByOthers));
+				}
+			})
+			.catch(() => {});
 		const unsub = subscribeToRoomMessages(room.id, (incoming) => {
-			setMessages((prev) => mergeIncomingMessage(prev, incoming));
+			setMessages((prev) => {
+				const merged = mergeIncomingMessage(prev, incoming);
+				return applySeenCutoff(merged, seenByAllUpTo);
+			});
 		});
 		return () => { mounted = false; unsub(); };
-	}, [room.id, enhanceIncomingMessage, mergeIncomingMessage]);
+	}, [room.id, refreshKey, enhanceIncomingMessage, mergeIncomingMessage, applySeenCutoff, seenByAllUpTo]);
 
-	// When switching rooms, ensure we do the initial jump-to-bottom again
+	// When switching rooms or forcing refresh, ensure we reset and do the initial jump-to-bottom again
 	useEffect(() => {
+		setMessages([]); // clear to avoid cross-room residue
 		didInitialScrollRef.current = false;
 		setIsNearBottom(true);
 		lastSeenMessageIdRef.current = 0;
 		pendingPresenceUpdateRef.current = null;
 		messagesStateRef.current = [];
-	}, [room.id]);
+	}, [room.id, refreshKey]);
 
 	useEffect(() => {
 		// On first load after messages arrive, jump to bottom instantly
@@ -361,9 +403,17 @@ function ChatView({ room, me, onOpenRooms, onLogout }: { room: Room; me: string;
 				changed = true;
 				return { ...msg, status: 'seen' as MessageStatus };
 			});
+			// Persist minimal seen cutoff to keep blue ticks after refresh
+			const others = Object.entries(presenceMap).filter(([user]) => user !== me);
+			if (others.length) {
+				const minSeenByOthers = Math.min(...others.map(([, v]) => v ?? 0));
+				if (minSeenByOthers > 0 && minSeenByOthers > (seenByAllUpTo ?? 0)) {
+					setSeenByAllUpTo(minSeenByOthers);
+				}
+			}
 			return changed ? next : prev;
 		});
-	}, [presenceMap, me]);
+	}, [presenceMap, me, seenByAllUpTo, setSeenByAllUpTo]);
 
 	async function handleSend() {
 		const trimmed = text.trim();
@@ -512,6 +562,7 @@ export default function App() {
 	const [rooms, setRooms] = useState<Room[]>([]);
 	const [activeId, setActiveId] = useState<number | null>(null);
 	const [showRooms, setShowRooms] = useState<boolean>(false);
+	const [roomRefreshKey, setRoomRefreshKey] = useState<number>(0);
 
 	useEffect(() => {
 		let mounted = true;
@@ -563,9 +614,19 @@ export default function App() {
 		}
 	}
 
+	function handleLeave(roomId: number) {
+		setJoinedIds(joinedIds.filter((id) => id !== roomId));
+		if (activeId === roomId) setActiveId(null);
+	}
+
 	function handleSelect(room: Room) {
 		if (joinedIds.includes(room.id)) {
-			setActiveId(room.id);
+			if (activeId === room.id) {
+				setRoomRefreshKey((v) => v + 1); // force refetch/resubscribe
+			} else {
+				setActiveId(room.id);
+				setRoomRefreshKey((v) => v + 1);
+			}
 			return;
 		}
 		window.alert('You are not joined to this room');
@@ -593,6 +654,7 @@ export default function App() {
 				onSelect={handleSelect}
 				onCreate={handleCreate}
 				onDelete={handleDelete}
+				onLeave={handleLeave}
 				onClose={() => setShowRooms(false)}
 				onJoin={handleJoin}
 				isOpen={showRooms}
@@ -601,7 +663,7 @@ export default function App() {
 			/>
 			{showRooms && <div className="backdrop" onClick={() => setShowRooms(false)} />}
 			{activeRoom ? (
-				<ChatView room={activeRoom} me={username} onOpenRooms={() => setShowRooms((v) => !v)} onLogout={handleLogout} />
+				<ChatView room={activeRoom} me={username} refreshKey={roomRefreshKey} onOpenRooms={() => setShowRooms((v) => !v)} onLogout={handleLogout} />
 			) : (
 				<div className="main">
 					<div className="chat-header">

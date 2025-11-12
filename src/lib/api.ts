@@ -74,3 +74,31 @@ export async function uploadFile(file: File): Promise<{ url: string; path: strin
 	const { data: publicUrl } = supabase.storage.from(bucket).getPublicUrl(data.path);
 	return { url: publicUrl.publicUrl, path: data.path, mime: file.type, name: file.name };
 } 
+
+// Server-persisted read receipts --------------------------------------------
+// Table schema expected:
+// create table if not exists read_receipts (
+//   room_id integer not null references rooms(id) on delete cascade,
+//   username text not null,
+//   last_seen_message_id integer not null default 0,
+//   updated_at timestamp with time zone default now(),
+//   primary key (room_id, username)
+// );
+
+export type ReadReceipt = { room_id: number; username: string; last_seen_message_id: number };
+
+export async function fetchReadReceipts(roomId: number): Promise<ReadReceipt[]> {
+	const { data, error } = await supabase
+		.from('read_receipts')
+		.select('room_id, username, last_seen_message_id')
+		.eq('room_id', roomId);
+	if (error) throw error;
+	return (data ?? []) as ReadReceipt[];
+}
+
+export async function upsertReadReceipt(roomId: number, username: string, lastSeenMessageId: number): Promise<void> {
+	const { error } = await supabase
+		.from('read_receipts')
+		.upsert({ room_id: roomId, username, last_seen_message_id: lastSeenMessageId }, { onConflict: 'room_id,username' });
+	if (error) throw error;
+}
