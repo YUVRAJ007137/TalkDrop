@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { RealtimeChannel } from '@supabase/supabase-js';
 import { useLocalStorage } from '../hooks/useLocalStorage';
-import { Room, ChatMessage, MessageStatus, parseMessagePayload, makeTextMessage, makeFileMessage } from '../types';
+import { Room, ChatMessage, MessageStatus, parseMessagePayload, makeTextMessage, makeFileMessage, UserPresence } from '../types';
 import { supabase } from '../lib/supabaseClient';
-import { fetchReadReceipts, upsertReadReceipt } from '../lib/api';
+import { fetchReadReceipts, upsertReadReceipt, type ReadReceipt } from '../lib/api';
+import { UserPresencePanel } from '../components/UserPresencePanel';
 
 function createClientId(): string {
 	return `client-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -178,7 +179,15 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 	const pendingPresenceUpdateRef = useRef<number | null>(null);
 	const lastSeenMessageIdRef = useRef<number>(0);
 	const [presenceMap, setPresenceMap] = useState<Record<string, number>>({});
+	const [userPresence, setUserPresence] = useState<UserPresence[]>([]);
+	const [readReceipts, setReadReceipts] = useState<ReadReceipt[]>([]);
 	const { value: seenByAllUpTo, setValue: setSeenByAllUpTo } = useLocalStorage<number>(`td:room:${room.id}:seenByAllUpTo`, 0);
+	const presenceUpdateTimeoutRef = useRef<number | null>(null);
+	const presenceActivityTimeoutRef = useRef<Record<string, number>>({});
+	const heartbeatIntervalRef = useRef<number | null>(null);
+	const localTypingRef = useRef<boolean>(false);
+	const typingStopTimeoutRef = useRef<number | null>(null);
+	const [typingUsers, setTypingUsers] = useState<string[]>([]);
 
 	function normalizeToDate(raw: string | number | null): Date {
 		const rawTs = raw ?? Date.now();
@@ -248,10 +257,53 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 		lastSeenMessageIdRef.current = lastSeenId;
 		const channel = presenceChannelRef.current;
 		if (presenceReadyRef.current && channel) {
-			void channel.track({ lastSeenMessageId: lastSeenId });
+			// Track presence immediately to be reflected in presenceMap including typing state
+			void channel.track({ lastSeenMessageId: lastSeenId, typing: localTypingRef.current }).catch((err) => {
+				console.warn('Failed to update presence:', err);
+			});
 			pendingPresenceUpdateRef.current = null;
 		} else {
+			// Buffer update for when presence is ready
 			pendingPresenceUpdateRef.current = lastSeenId;
+		}
+	}, []);
+
+	const startTyping = useCallback(() => {
+		if (typingStopTimeoutRef.current !== null) {
+			window.clearTimeout(typingStopTimeoutRef.current);
+		}
+		if (!localTypingRef.current) {
+			localTypingRef.current = true;
+			// Inform presence channel if ready
+			const channel = presenceChannelRef.current;
+			if (presenceReadyRef.current && channel) {
+				void channel.track({ lastSeenMessageId: lastSeenMessageIdRef.current, typing: true }).catch(() => {});
+			}
+		}
+		// Stop typing after 1.5s of inactivity
+		typingStopTimeoutRef.current = window.setTimeout(() => {
+			if (localTypingRef.current) {
+				localTypingRef.current = false;
+				const channel = presenceChannelRef.current;
+				if (presenceReadyRef.current && channel) {
+					void channel.track({ lastSeenMessageId: lastSeenMessageIdRef.current, typing: false }).catch(() => {});
+				}
+			}
+			typingStopTimeoutRef.current = null;
+		}, 1500);
+	}, []);
+
+	const stopTypingImmediate = useCallback(() => {
+		if (typingStopTimeoutRef.current !== null) {
+			window.clearTimeout(typingStopTimeoutRef.current);
+			typingStopTimeoutRef.current = null;
+		}
+		if (localTypingRef.current) {
+			localTypingRef.current = false;
+			const channel = presenceChannelRef.current;
+			if (presenceReadyRef.current && channel) {
+				void channel.track({ lastSeenMessageId: lastSeenMessageIdRef.current, typing: false }).catch(() => {});
+			}
 		}
 	}, []);
 
@@ -359,51 +411,141 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 		presenceChannelRef.current = channel;
 		presenceReadyRef.current = false;
 		setPresenceMap({});
+		setUserPresence([]);
+		presenceActivityTimeoutRef.current = {};
+		
 		channel.on('presence', { event: 'sync' }, () => {
-			const state = channel.presenceState() as Record<string, Array<{ lastSeenMessageId?: number }>>;
-			const next: Record<string, number> = {};
-			for (const [user, sessions] of Object.entries(state)) {
-				const max = sessions.reduce((acc, session) => Math.max(acc, session.lastSeenMessageId ?? 0), 0);
-				next[user] = max;
+			// Debounce presence updates to avoid rapid state changes
+			if (presenceUpdateTimeoutRef.current !== null) {
+				window.clearTimeout(presenceUpdateTimeoutRef.current);
 			}
-			setPresenceMap(next);
+			presenceUpdateTimeoutRef.current = window.setTimeout(() => {
+				const state = channel.presenceState() as Record<string, Array<{ lastSeenMessageId?: number }>>;
+				const next: Record<string, number> = {};
+				const presenceList: UserPresence[] = [];
+				const now = Date.now();
+				
+				for (const [user, sessions] of Object.entries(state)) {
+					const max = sessions.reduce((acc, session) => Math.max(acc, session.lastSeenMessageId ?? 0), 0);
+					next[user] = max;
+					// Update lastActivity to now for online sessions
+					presenceActivityTimeoutRef.current[user] = now;
+					const isTyping = sessions.some((s) => !!(s as any).typing);
+					if (isTyping && user !== me) {
+						// we'll aggregate typing users below
+					}
+					presenceList.push({
+						username: user,
+						lastSeenMessageId: max,
+						lastActivity: presenceActivityTimeoutRef.current[user],
+						isOnline: true
+					});
+				}
+
+				// Aggregate typing users from presence state (session metadata may include `typing`)
+				const typingNow: string[] = [];
+				for (const [user, sessions] of Object.entries(state)) {
+					const isTyping = sessions.some((s) => !!(s as any).typing);
+					if (isTyping && user !== me) typingNow.push(user);
+				}
+				setTypingUsers(typingNow);
+				setPresenceMap(next);
+				// Build set of currently-online usernames
+				const onlineSet = new Set(Object.keys(next));
+				// Merge into userPresence: online users get isOnline=true and lastActivity updated; others preserved but marked offline
+				setUserPresence((prev) => {
+					const map = new Map<string, import('../types').UserPresence>();
+					// start with previous users
+					for (const u of prev) map.set(u.username, { ...u, isOnline: onlineSet.has(u.username) });
+					// overwrite/add with fresh presenceList entries (ensure latest lastActivity)
+					for (const p of presenceList) map.set(p.username, p);
+					// ensure users not in onlineSet but present keep their previous lastActivity
+					return Array.from(map.values()).sort((a, b) => {
+						if (a.isOnline !== b.isOnline) return a.isOnline ? -1 : 1;
+						return b.lastActivity - a.lastActivity;
+					});
+				});
+				presenceUpdateTimeoutRef.current = null;
+			}, 300); // 300ms debounce buffer
 		});
+		
 		void channel.subscribe(async (status) => {
 			if (status === 'SUBSCRIBED') {
 				presenceReadyRef.current = true;
 				const initial = lastSeenMessageIdRef.current;
-				await channel.track({ lastSeenMessageId: initial });
+				await channel.track({ lastSeenMessageId: initial, typing: localTypingRef.current });
 				if (pendingPresenceUpdateRef.current && pendingPresenceUpdateRef.current > initial) {
 					const nextValue = pendingPresenceUpdateRef.current;
 					pendingPresenceUpdateRef.current = null;
 					lastSeenMessageIdRef.current = nextValue;
-					await channel.track({ lastSeenMessageId: nextValue });
+					await channel.track({ lastSeenMessageId: nextValue, typing: localTypingRef.current });
+				}
+				// start a heartbeat so the server sees us as online and other clients get timely presence updates
+				if (heartbeatIntervalRef.current === null) {
+					heartbeatIntervalRef.current = window.setInterval(() => {
+						try {
+							channel.track({ lastSeenMessageId: lastSeenMessageIdRef.current, typing: localTypingRef.current });
+						} catch (e) {
+							// ignore
+						}
+					}, 10000); // every 10s
 				}
 			}
 		});
+		
 		return () => {
 			presenceReadyRef.current = false;
 			pendingPresenceUpdateRef.current = null;
+			if (presenceUpdateTimeoutRef.current !== null) {
+				window.clearTimeout(presenceUpdateTimeoutRef.current);
+				presenceUpdateTimeoutRef.current = null;
+			}
+			if (heartbeatIntervalRef.current !== null) {
+				window.clearInterval(heartbeatIntervalRef.current);
+				heartbeatIntervalRef.current = null;
+			}
+			// clear any typing timers and inform channel
+			stopTypingImmediate();
 			presenceChannelRef.current = null;
 			setPresenceMap({});
+			setUserPresence([]);
+			presenceActivityTimeoutRef.current = {};
+			// Try to persist the last seen to server so others see an up-to-date lastActivity
+			try {
+				void upsertReadReceipt(room.id, me, lastSeenMessageIdRef.current).catch(() => {});
+			} catch (_) {
+				// ignore
+			}
 			channel.unsubscribe();
 		};
 	}, [room.id, me]);
 
 	useEffect(() => {
 		if (!Object.keys(presenceMap).length) return;
+		
 		setMessages((prev) => {
 			let changed = false;
 			const next = prev.map((msg) => {
 				if (msg.username !== me || msg.status === 'seen' || msg.id <= 0) return msg;
+				
+				// Get all other users (excluding self)
 				const others = Object.entries(presenceMap).filter(([user]) => user !== me);
-				if (!others.length) return msg;
-				const seen = others.every(([, lastSeen]) => (lastSeen ?? 0) >= msg.id);
-				if (!seen) return msg;
+				if (!others.length) return msg; // No other users to verify against
+				
+				// Check if ALL other users have seen this message
+				const allSeenIt = others.every(([, lastSeen]) => {
+					const lastSeenId = lastSeen ?? 0;
+					return lastSeenId >= msg.id;
+				});
+				
+				if (!allSeenIt) return msg;
+				
+				// Message is seen by all
 				changed = true;
 				return { ...msg, status: 'seen' as MessageStatus };
 			});
-			// Persist minimal seen cutoff to keep blue ticks after refresh
+			
+			// Also update the persisted seen cutoff from other users' presence
 			const others = Object.entries(presenceMap).filter(([user]) => user !== me);
 			if (others.length) {
 				const minSeenByOthers = Math.min(...others.map(([, v]) => v ?? 0));
@@ -411,9 +553,49 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 					setSeenByAllUpTo(minSeenByOthers);
 				}
 			}
+			
 			return changed ? next : prev;
 		});
 	}, [presenceMap, me, seenByAllUpTo, setSeenByAllUpTo]);
+
+	// Fetch read receipts (historical last seen) once per room and store them
+useEffect(() => {
+		let mounted = true;
+		fetchReadReceipts(room.id)
+			.then((receipts) => { if (!mounted) return; setReadReceipts(receipts); })
+			.catch((err) => console.warn('Failed to fetch read receipts:', err));
+		return () => { mounted = false; };
+	}, [room.id]);
+
+	// Rebuild the userPresence list from presenceMap (online) + readReceipts (historical)
+useEffect(() => {
+		// Build receipts map for lookup
+		const receiptsMap: Record<string, ReadReceipt> = {};
+		for (const r of readReceipts) receiptsMap[r.username] = r;
+		const onlineUsers = Object.entries(presenceMap);
+		// For online users prefer the in-memory presenceActivity timestamp (set during presence sync).
+		// Fall back to server receipt updated_at if no presence activity timestamp exists.
+		const onlineList: UserPresence[] = onlineUsers.map(([username, lastSeenMessageId]) => ({
+			username,
+			lastSeenMessageId,
+			lastActivity: (presenceActivityTimeoutRef.current && presenceActivityTimeoutRef.current[username])
+				? presenceActivityTimeoutRef.current[username]
+				: (receiptsMap[username] ? new Date(receiptsMap[username].updated_at ?? Date.now()).getTime() : Date.now()),
+			isOnline: true
+		}));
+		// Offline/historical users come from server read receipts. Use a proper membership check
+		// so users with a lastSeen of 0 are not treated as absent incorrectly.
+		const offlineList: UserPresence[] = readReceipts
+			.filter((r) => !(Object.prototype.hasOwnProperty.call(presenceMap, r.username)) && r.username !== me)
+			.map((r) => ({
+				username: r.username,
+				lastSeenMessageId: r.last_seen_message_id,
+				lastActivity: new Date(r.updated_at ?? Date.now()).getTime(),
+				isOnline: false
+			}));
+		const merged = [...onlineList, ...offlineList];
+		setUserPresence(merged.sort((a, b) => (a.isOnline === b.isOnline ? b.lastActivity - a.lastActivity : (a.isOnline ? -1 : 1))));
+	}, [presenceMap, readReceipts, me]);
 
 	async function handleSend() {
 		const trimmed = text.trim();
@@ -468,6 +650,8 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 			}
 		}
 		setText('');
+		// stop typing immediately after send
+		stopTypingImmediate();
 		setPendingFile(null);
 		// Ensure we scroll to the newest message after sending
 		requestAnimationFrame(() => endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }));
@@ -480,6 +664,11 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 	function onFileChange(e: React.ChangeEvent<HTMLInputElement>) {
 		const file = e.target.files?.[0] ?? null;
 		setPendingFile(file);
+	}
+
+	function handleInputChange(e: React.ChangeEvent<HTMLInputElement>) {
+		setText(e.target.value);
+		startTyping();
 	}
 
 	function handleMessagesScroll() {
@@ -528,6 +717,12 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 				})()}
 				<div ref={endRef} />
 			</div>
+			{/* Typing indicator (shows when other participants are typing) */}
+			{typingUsers.length > 0 && (
+				<div className="typing-indicator" aria-live="polite">
+					{typingUsers.length === 1 ? `${typingUsers[0]} is typing...` : `${typingUsers.join(', ')} are typing...`}
+				</div>
+			)}
 			<div className="input-row">
 				<input type="file" ref={fileInputRef} style={{ display: 'none' }} onChange={onFileChange} />
 				<button className="icon-button" onClick={onPickFileClick} aria-label="Attach file">
@@ -542,10 +737,11 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 							<button className="tag-clear" onClick={() => { setPendingFile(null); if (fileInputRef.current) fileInputRef.current.value = ''; }} aria-label="Remove file">×</button>
 						</div>
 					)}
-					<input type="text" placeholder="Type a message" value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSend()} />
+					<input type="text" placeholder="Type a message" value={text} onChange={handleInputChange} onKeyDown={(e) => e.key === 'Enter' && handleSend()} />
 				</div>
 				<button className="button" onClick={handleSend} disabled={isSending}>Send</button>
 			</div>
+			<UserPresencePanel users={userPresence} currentUsername={me} />
 			{isSending && (
 				<div className="fixed inset-0 z-40 bg-black/40 backdrop-blur-sm flex flex-col items-center justify-center gap-3">
 					<div className="w-10 h-10 border-4 border-white/30 border-t-white rounded-full animate-spin" />

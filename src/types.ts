@@ -16,6 +16,13 @@ export type ChatMessage = {
 	clientId?: string;
 };
 
+export type UserPresence = {
+	username: string;
+	lastSeenMessageId: number;
+	lastActivity: number; // timestamp in ms
+	isOnline: boolean;
+};
+
 export type ParsedMessage =
 	| { kind: 'text'; text: string; clientId?: string }
 	| { kind: 'file'; url: string; mime: string; name: string; clientId?: string };

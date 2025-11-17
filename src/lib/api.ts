@@ -85,12 +85,12 @@ export async function uploadFile(file: File): Promise<{ url: string; path: strin
 //   primary key (room_id, username)
 // );
 
-export type ReadReceipt = { room_id: number; username: string; last_seen_message_id: number };
+export type ReadReceipt = { room_id: number; username: string; last_seen_message_id: number; updated_at?: string };
 
 export async function fetchReadReceipts(roomId: number): Promise<ReadReceipt[]> {
 	const { data, error } = await supabase
 		.from('read_receipts')
-		.select('room_id, username, last_seen_message_id')
+		.select('room_id, username, last_seen_message_id, updated_at')
 		.eq('room_id', roomId);
 	if (error) throw error;
 	return (data ?? []) as ReadReceipt[];

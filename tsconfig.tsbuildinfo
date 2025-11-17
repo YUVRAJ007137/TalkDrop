@@ -1,0 +1,1 @@
+{"root":["./src/main.tsx","./src/types.ts","./src/vite-env.d.ts","./src/components/userpresencepanel.tsx","./src/hooks/uselocalstorage.ts","./src/lib/api.ts","./src/lib/supabaseclient.ts","./src/ui/app.tsx"],"version":"5.9.2"}
