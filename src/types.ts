@@ -14,6 +14,9 @@ export type ChatMessage = {
 	timestamp: string;
 	status?: MessageStatus;
 	clientId?: string;
+	is_deleted?: boolean; // soft-delete flag
+	edited_at?: string; // timestamp when message was edited
+	original_message?: string; // original message before edit
 };
 
 export type UserPresence = {
@@ -21,6 +24,7 @@ export type UserPresence = {
 	lastSeenMessageId: number;
 	lastActivity: number; // timestamp in ms
 	isOnline: boolean;
+	mood?: string; // optional emoji or mood key
 };
 
 export type ParsedMessage =

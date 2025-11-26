@@ -78,10 +78,10 @@ export function UserPresencePanel({ users, currentUsername }: { users: UserPrese
 					{online.map((user) => (
 						<div key={user.username} className="presence-item">
 							<div className="presence-user-info">
+								{/* Mood emoji (if any) */}
+								{user.mood ? <span className="presence-mood" aria-hidden style={{ marginRight: 6 }}>{user.mood}</span> : null}
+								<span className="presence-status" style={{ color: getStatusColor(user.isOnline), marginRight: 6 }}>●</span>
 								<span className="presence-username">{user.username}</span>
-								<span className="presence-status" style={{ color: getStatusColor(user.isOnline) }}>
-									●
-								</span>
 							</div>
 							<div className="presence-details">
 								<div className="presence-label">{getStatusLabel(user.isOnline)}</div>
@@ -103,10 +103,9 @@ export function UserPresencePanel({ users, currentUsername }: { users: UserPrese
 							{offline.map((user) => (
 								<div key={user.username} className="presence-item last-seen-item">
 									<div className="presence-user-info">
+										{user.mood ? <span className="presence-mood" aria-hidden style={{ marginRight: 6 }}>{user.mood}</span> : null}
+										<span className="presence-status" style={{ color: getStatusColor(user.isOnline), marginRight: 6 }}>●</span>
 										<span className="presence-username">{user.username}</span>
-										<span className="presence-status" style={{ color: getStatusColor(user.isOnline) }}>
-											●
-										</span>
 									</div>
 									<div className="presence-details">
 										<div className="presence-label">{getStatusLabel(user.isOnline)}</div>

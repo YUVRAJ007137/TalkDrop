@@ -3,8 +3,10 @@ import type { RealtimeChannel } from '@supabase/supabase-js';
 import { useLocalStorage } from '../hooks/useLocalStorage';
 import { Room, ChatMessage, MessageStatus, parseMessagePayload, makeTextMessage, makeFileMessage, UserPresence } from '../types';
 import { supabase } from '../lib/supabaseClient';
-import { fetchReadReceipts, upsertReadReceipt, type ReadReceipt } from '../lib/api';
+import { fetchReadReceipts, upsertReadReceipt, fetchUserMoods, upsertUserMood, fetchMessageById, type ReadReceipt } from '../lib/api';
+import { deleteMessage, editMessage } from '../lib/messageEdits';
 import { UserPresencePanel } from '../components/UserPresencePanel';
+import { MessageActions } from '../components/MessageActions';
 
 function createClientId(): string {
 	return `client-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -122,7 +124,7 @@ function MessageStatusIcon({ status }: { status?: MessageStatus }) {
 	);
 }
 
-function MessageBubble({ me, msg }: { me: string; msg: ChatMessage }) {
+function MessageBubble({ me, msg, onEdit, onDelete }: { me: string; msg: ChatMessage; onEdit?: (id: number, text: string) => void; onDelete?: (id: number) => void }) {
 	const payload = useMemo(() => parseMessagePayload(msg.message), [msg.message]);
 	const isSelf = msg.username === me;
 	const rawTs = msg.timestamp ?? Date.now();
@@ -130,10 +132,28 @@ function MessageBubble({ me, msg }: { me: string; msg: ChatMessage }) {
 		? new Date(rawTs.endsWith('Z') ? rawTs : rawTs + 'Z')
 		: new Date(rawTs);
 	const timeIST = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Asia/Kolkata' }).format(normalizedDate);
+
+	if (msg.is_deleted) {
+		return (
+			<div className={`message ${isSelf ? 'self' : ''}`} style={{ opacity: 0.5 }}>
+				<div style={{ fontWeight: 600, marginBottom: 4, fontSize: 13 }}>{msg.username}</div>
+				<div style={{ fontStyle: 'italic', color: 'var(--wa-muted)' }}>This message was deleted</div>
+				<div className="timestamp">
+					<span>{timeIST}</span>
+				</div>
+			</div>
+		);
+	}
+
 	return (
-		<div className={`message ${isSelf ? 'self' : ''}`}>
+		<div className={`message ${isSelf ? 'self' : ''}`} style={{ position: 'relative' }}>
 			<div style={{ fontWeight: 600, marginBottom: 4 }}>{msg.username}</div>
-			{payload.kind === 'text' && <div>{payload.text}</div>}
+			{payload.kind === 'text' && (
+				<div>
+					<div>{payload.text}</div>
+					{msg.edited_at && <div style={{ fontSize: 11, color: 'var(--wa-muted)', marginTop: 2 }}>(edited)</div>}
+				</div>
+			)}
 			{payload.kind === 'file' && (
 				<div>
 					{payload.mime.startsWith('image/') && (
@@ -153,9 +173,21 @@ function MessageBubble({ me, msg }: { me: string; msg: ChatMessage }) {
 					)}
 				</div>
 			)}
-			<div className="timestamp">
-				<span>{timeIST}</span>
-				{isSelf && <MessageStatusIcon status={msg.status} />}
+			<div className="timestamp" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+				<div>
+					<span>{timeIST}</span>
+					{isSelf && <MessageStatusIcon status={msg.status} />}
+				</div>
+				{isSelf && onEdit && onDelete && (
+					<MessageActions
+						messageId={msg.id}
+						messageText={payload.kind === 'text' ? (payload as any).text : ''}
+						isSelf={isSelf}
+						editedAt={msg.edited_at}
+						onEdit={onEdit}
+						onDelete={onDelete}
+					/>
+				)}
 			</div>
 		</div>
 	);
@@ -180,6 +212,13 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 	const lastSeenMessageIdRef = useRef<number>(0);
 	const [presenceMap, setPresenceMap] = useState<Record<string, number>>({});
 	const [userPresence, setUserPresence] = useState<UserPresence[]>([]);
+	const [moodMapState, setMoodMapState] = useState<Record<string, string | undefined>>({});
+	const [hasMoreOlder, setHasMoreOlder] = useState<boolean>(true);
+	const loadingOlderRef = useRef<boolean>(false);
+	const PAGE_SIZE = 25;
+	const [loadingOlder, setLoadingOlder] = useState<boolean>(false);
+	// Keep authoritative server moods separate so presence-derived moods don't override DB
+	const serverMoodRef = useRef<Record<string, string | undefined>>({});
 	const [readReceipts, setReadReceipts] = useState<ReadReceipt[]>([]);
 	const { value: seenByAllUpTo, setValue: setSeenByAllUpTo } = useLocalStorage<number>(`td:room:${room.id}:seenByAllUpTo`, 0);
 	const presenceUpdateTimeoutRef = useRef<number | null>(null);
@@ -188,6 +227,36 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 	const localTypingRef = useRef<boolean>(false);
 	const typingStopTimeoutRef = useRef<number | null>(null);
 	const [typingUsers, setTypingUsers] = useState<string[]>([]);
+	// Persist mood per-username so it can be resent when rejoining a room
+	const { value: storedMood, setValue: setStoredMood, remove: removeStoredMood } = useLocalStorage<string | null>(`td:username:${me}:mood`, null);
+	const [mood, _setMood] = useState<string | null>(storedMood ?? null);
+	// pendingMoodRef kept for backward compatibility with earlier local presence buffering; not used when moods are server-side
+	const pendingMoodRef = useRef<string | null>(null);
+
+	function setMood(emoji: string | null) {
+		_setMood(emoji);
+		try { setStoredMood(emoji); } catch { /* ignore */ }
+	}
+	const [showMoodPicker, setShowMoodPicker] = useState(false);
+
+	const MOODS: Array<{ key: string; emoji: string; label: string }> = [
+		{ key: 'happy', emoji: '😊', label: 'Happy' },
+		{ key: 'sad', emoji: '😢', label: 'Sad' },
+		{ key: 'frustrated', emoji: '😤', label: 'Frustrated' },
+		{ key: 'romantic', emoji: '😍', label: 'Romantic' },
+		{ key: 'angry', emoji: '😠', label: 'Angry' }
+	];
+
+	function selectMood(emoji: string) {
+		setMood(emoji);
+		setShowMoodPicker(false);
+		const channel = presenceChannelRef.current;
+		if (presenceReadyRef.current && channel) {
+			void channel.track({ lastSeenMessageId: lastSeenMessageIdRef.current, typing: localTypingRef.current }).catch(() => { });
+		}
+		// Persist mood to server so others can fetch authoritative mood when joining
+		void upsertUserMood(me, emoji).catch(() => { });
+	}
 
 	function normalizeToDate(raw: string | number | null): Date {
 		const rawTs = raw ?? Date.now();
@@ -277,7 +346,7 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 			// Inform presence channel if ready
 			const channel = presenceChannelRef.current;
 			if (presenceReadyRef.current && channel) {
-				void channel.track({ lastSeenMessageId: lastSeenMessageIdRef.current, typing: true }).catch(() => {});
+				void channel.track({ lastSeenMessageId: lastSeenMessageIdRef.current, typing: true }).catch(() => { });
 			}
 		}
 		// Stop typing after 1.5s of inactivity
@@ -286,7 +355,7 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 				localTypingRef.current = false;
 				const channel = presenceChannelRef.current;
 				if (presenceReadyRef.current && channel) {
-					void channel.track({ lastSeenMessageId: lastSeenMessageIdRef.current, typing: false }).catch(() => {});
+					void channel.track({ lastSeenMessageId: lastSeenMessageIdRef.current, typing: false }).catch(() => { });
 				}
 			}
 			typingStopTimeoutRef.current = null;
@@ -302,7 +371,7 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 			localTypingRef.current = false;
 			const channel = presenceChannelRef.current;
 			if (presenceReadyRef.current && channel) {
-				void channel.track({ lastSeenMessageId: lastSeenMessageIdRef.current, typing: false }).catch(() => {});
+				void channel.track({ lastSeenMessageId: lastSeenMessageIdRef.current, typing: false }).catch(() => { });
 			}
 		}
 	}, []);
@@ -314,7 +383,7 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 		if (lastServerMessageId > 0) {
 			updatePresence(lastServerMessageId);
 			// Persist to server so read state survives history clears
-			void upsertReadReceipt(room.id, me, lastServerMessageId).catch(() => {});
+			void upsertReadReceipt(room.id, me, lastServerMessageId).catch(() => { });
 		}
 	}, [updatePresence]);
 
@@ -335,8 +404,11 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 
 	useEffect(() => {
 		let mounted = true;
-		fetchMessages(room.id).then((list) => {
+		// initial load: fetch latest `pageSize` messages
+		const pageSize = 25;
+		fetchMessages(room.id, pageSize).then((list) => {
 			if (!mounted) return;
+			// list is oldest->newest
 			setMessages((prev) => {
 				const mapped = list.map((msg) => enhanceIncomingMessage(msg));
 				let next = [...prev];
@@ -348,6 +420,12 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 				next = applySeenCutoff(next, seenByAllUpTo);
 				return next;
 			});
+			// determine if there are more older messages
+			if (list.length < pageSize) {
+				setHasMoreOlder(false);
+			} else {
+				setHasMoreOlder(true);
+			}
 		});
 		// Fetch server receipts and derive a conservative "seen by all" cutoff from other participants
 		fetchReadReceipts(room.id)
@@ -360,7 +438,7 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 					setMessages((prev) => applySeenCutoff(prev, minSeenByOthers));
 				}
 			})
-			.catch(() => {});
+			.catch(() => { });
 		const unsub = subscribeToRoomMessages(room.id, (incoming) => {
 			setMessages((prev) => {
 				const merged = mergeIncomingMessage(prev, incoming);
@@ -369,6 +447,35 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 		});
 		return () => { mounted = false; unsub(); };
 	}, [room.id, refreshKey, enhanceIncomingMessage, mergeIncomingMessage, applySeenCutoff, seenByAllUpTo]);
+
+	// Subscribe to message UPDATE/DELETE events (edits and deletes)
+	useEffect(() => {
+		const channel = supabase
+			.channel(`room:${room.id}:message-edits`)
+			.on(
+				'postgres_changes',
+				{ event: 'UPDATE', schema: 'public', table: 'messages', filter: `room_id=eq.${room.id}` },
+				(payload: any) => {
+					try {
+						const updatedRow = payload.new as ChatMessage | undefined;
+						if (updatedRow) {
+							setMessages((prev) =>
+								prev.map((msg) =>
+									msg.id === updatedRow.id ? updatedRow : msg
+								)
+							);
+						}
+					} catch (e) {
+						// ignore subscription errors
+					}
+				}
+			)
+			.subscribe();
+
+		return () => {
+			channel.unsubscribe();
+		};
+	}, [room.id]);
 
 	// When switching rooms or forcing refresh, ensure we reset and do the initial jump-to-bottom again
 	useEffect(() => {
@@ -410,10 +517,11 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 		});
 		presenceChannelRef.current = channel;
 		presenceReadyRef.current = false;
+		let moodsChannel: any = null;
 		setPresenceMap({});
 		setUserPresence([]);
 		presenceActivityTimeoutRef.current = {};
-		
+
 		channel.on('presence', { event: 'sync' }, () => {
 			// Debounce presence updates to avoid rapid state changes
 			if (presenceUpdateTimeoutRef.current !== null) {
@@ -424,13 +532,16 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 				const next: Record<string, number> = {};
 				const presenceList: UserPresence[] = [];
 				const now = Date.now();
-				
+
 				for (const [user, sessions] of Object.entries(state)) {
 					const max = sessions.reduce((acc, session) => Math.max(acc, session.lastSeenMessageId ?? 0), 0);
 					next[user] = max;
 					// Update lastActivity to now for online sessions
 					presenceActivityTimeoutRef.current[user] = now;
 					const isTyping = sessions.some((s) => !!(s as any).typing);
+					// collect mood from session metadata if present
+					const moodFromSessions = sessions.map((s) => (s as any).mood).filter(Boolean);
+					const mood = moodFromSessions.length ? moodFromSessions[moodFromSessions.length - 1] : undefined;
 					if (isTyping && user !== me) {
 						// we'll aggregate typing users below
 					}
@@ -438,6 +549,7 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 						username: user,
 						lastSeenMessageId: max,
 						lastActivity: presenceActivityTimeoutRef.current[user],
+						mood,
 						isOnline: true
 					});
 				}
@@ -448,8 +560,37 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 					const isTyping = sessions.some((s) => !!(s as any).typing);
 					if (isTyping && user !== me) typingNow.push(user);
 				}
+				// Also extract mood per-user from presence state (last session that included mood)
+				const moodMap: Record<string, string | undefined> = {};
+				for (const [user, sessions] of Object.entries(state)) {
+					const moods = sessions.map((s) => (s as any).mood).filter(Boolean);
+					moodMap[user] = moods.length ? moods[moods.length - 1] : undefined;
+				}
 				setTypingUsers(typingNow);
 				setPresenceMap(next);
+				// Merge presence-derived moods only for users that don't have a server-stored mood.
+				// Server moods are authoritative and updated via the user_moods realtime subscription.
+				setMoodMapState((prev) => {
+					const merged = { ...(prev ?? {}) } as Record<string, string | undefined>;
+					try {
+						for (const [u, m] of Object.entries(moodMap)) {
+							// if server has a mood for this user, prefer that
+							if (serverMoodRef.current && Object.prototype.hasOwnProperty.call(serverMoodRef.current, u)) {
+								// ensure merged reflects server mood (may be undefined)
+								merged[u] = serverMoodRef.current[u];
+								continue;
+							}
+							// otherwise use presence-derived mood
+							merged[u] = m;
+							const key = `td:username:${u}:mood`;
+							if (m) localStorage.setItem(key, JSON.stringify(m));
+							else localStorage.removeItem(key);
+						}
+					} catch (e) {
+						// ignore storage errors
+					}
+					return merged;
+				});
 				// Build set of currently-online usernames
 				const onlineSet = new Set(Object.keys(next));
 				// Merge into userPresence: online users get isOnline=true and lastActivity updated; others preserved but marked offline
@@ -460,6 +601,7 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 					// overwrite/add with fresh presenceList entries (ensure latest lastActivity)
 					for (const p of presenceList) map.set(p.username, p);
 					// ensure users not in onlineSet but present keep their previous lastActivity
+					// ensure users not in onlineSet but present keep their previous lastActivity
 					return Array.from(map.values()).sort((a, b) => {
 						if (a.isOnline !== b.isOnline) return a.isOnline ? -1 : 1;
 						return b.lastActivity - a.lastActivity;
@@ -468,12 +610,33 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 				presenceUpdateTimeoutRef.current = null;
 			}, 300); // 300ms debounce buffer
 		});
-		
+
 		void channel.subscribe(async (status) => {
 			if (status === 'SUBSCRIBED') {
 				presenceReadyRef.current = true;
 				const initial = lastSeenMessageIdRef.current;
+				// When subscribing, do not send mood via presence - moods are server-authoritative
 				await channel.track({ lastSeenMessageId: initial, typing: localTypingRef.current });
+				// Fetch persisted moods from server for currently-present users and seed local storage
+				try {
+					const stateNow = channel.presenceState() as Record<string, Array<Record<string, unknown>>>;
+					const usernames = Object.keys(stateNow).filter(Boolean);
+					if (usernames.length) {
+						const serverMoods = await fetchUserMoods(usernames);
+						const serverMoodMap: Record<string, string | undefined> = {};
+						for (const row of serverMoods) {
+							serverMoodMap[row.username] = row.mood ?? undefined;
+							const key = `td:username:${row.username}:mood`;
+							if (row.mood) localStorage.setItem(key, JSON.stringify(row.mood));
+							else localStorage.removeItem(key);
+						}
+						// store authoritative server moods
+						serverMoodRef.current = serverMoodMap;
+						setMoodMapState((prev) => ({ ...(prev ?? {}), ...serverMoodMap }));
+					}
+				} catch (e) {
+					// ignore server fetch errors silently
+				}
 				if (pendingPresenceUpdateRef.current && pendingPresenceUpdateRef.current > initial) {
 					const nextValue = pendingPresenceUpdateRef.current;
 					pendingPresenceUpdateRef.current = null;
@@ -490,9 +653,38 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 						}
 					}, 10000); // every 10s
 				}
+
+				// Subscribe to server-side mood changes (user_moods table) so DB changes are authoritative
+				moodsChannel = supabase
+					.channel('user_moods:listen')
+					.on('postgres_changes', { event: '*', schema: 'public', table: 'user_moods' }, (payload: any) => {
+						try {
+							const newRow = payload.new as { username: string; mood: string | null } | undefined;
+							const oldRow = payload.old as { username: string } | undefined;
+							if (newRow) {
+								// INSERT or UPDATE
+								const username = newRow.username;
+								const m = newRow.mood ?? undefined;
+								serverMoodRef.current = { ...(serverMoodRef.current ?? {}), [username]: m };
+								const key = `td:username:${username}:mood`;
+								if (m) localStorage.setItem(key, JSON.stringify(m)); else localStorage.removeItem(key);
+								setMoodMapState((prev) => ({ ...(prev ?? {}), [username]: m }));
+							} else if (oldRow) {
+								const username = oldRow.username;
+								if (serverMoodRef.current && Object.prototype.hasOwnProperty.call(serverMoodRef.current, username)) {
+									delete serverMoodRef.current[username];
+								}
+								localStorage.removeItem(`td:username:${username}:mood`);
+								setMoodMapState((prev) => ({ ...(prev ?? {}), [username]: undefined }));
+							}
+						} catch (e) {
+							// ignore
+						}
+					})
+					.subscribe();
 			}
 		});
-		
+
 		return () => {
 			presenceReadyRef.current = false;
 			pendingPresenceUpdateRef.current = null;
@@ -512,39 +704,45 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 			presenceActivityTimeoutRef.current = {};
 			// Try to persist the last seen to server so others see an up-to-date lastActivity
 			try {
-				void upsertReadReceipt(room.id, me, lastSeenMessageIdRef.current).catch(() => {});
+				void upsertReadReceipt(room.id, me, lastSeenMessageIdRef.current).catch(() => { });
 			} catch (_) {
 				// ignore
 			}
+			// unsubscribe moods channel if present
+			try {
+				if (typeof moodsChannel !== 'undefined' && moodsChannel) {
+					supabase.removeChannel(moodsChannel);
+				}
+			} catch (_) { }
 			channel.unsubscribe();
 		};
 	}, [room.id, me]);
 
 	useEffect(() => {
 		if (!Object.keys(presenceMap).length) return;
-		
+
 		setMessages((prev) => {
 			let changed = false;
 			const next = prev.map((msg) => {
 				if (msg.username !== me || msg.status === 'seen' || msg.id <= 0) return msg;
-				
+
 				// Get all other users (excluding self)
 				const others = Object.entries(presenceMap).filter(([user]) => user !== me);
 				if (!others.length) return msg; // No other users to verify against
-				
+
 				// Check if ALL other users have seen this message
 				const allSeenIt = others.every(([, lastSeen]) => {
 					const lastSeenId = lastSeen ?? 0;
 					return lastSeenId >= msg.id;
 				});
-				
+
 				if (!allSeenIt) return msg;
-				
+
 				// Message is seen by all
 				changed = true;
 				return { ...msg, status: 'seen' as MessageStatus };
 			});
-			
+
 			// Also update the persisted seen cutoff from other users' presence
 			const others = Object.entries(presenceMap).filter(([user]) => user !== me);
 			if (others.length) {
@@ -553,13 +751,13 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 					setSeenByAllUpTo(minSeenByOthers);
 				}
 			}
-			
+
 			return changed ? next : prev;
 		});
 	}, [presenceMap, me, seenByAllUpTo, setSeenByAllUpTo]);
 
 	// Fetch read receipts (historical last seen) once per room and store them
-useEffect(() => {
+	useEffect(() => {
 		let mounted = true;
 		fetchReadReceipts(room.id)
 			.then((receipts) => { if (!mounted) return; setReadReceipts(receipts); })
@@ -568,7 +766,7 @@ useEffect(() => {
 	}, [room.id]);
 
 	// Rebuild the userPresence list from presenceMap (online) + readReceipts (historical)
-useEffect(() => {
+	useEffect(() => {
 		// Build receipts map for lookup
 		const receiptsMap: Record<string, ReadReceipt> = {};
 		for (const r of readReceipts) receiptsMap[r.username] = r;
@@ -581,7 +779,8 @@ useEffect(() => {
 			lastActivity: (presenceActivityTimeoutRef.current && presenceActivityTimeoutRef.current[username])
 				? presenceActivityTimeoutRef.current[username]
 				: (receiptsMap[username] ? new Date(receiptsMap[username].updated_at ?? Date.now()).getTime() : Date.now()),
-			isOnline: true
+			isOnline: true,
+			mood: moodMapState[username]
 		}));
 		// Offline/historical users come from server read receipts. Use a proper membership check
 		// so users with a lastSeen of 0 are not treated as absent incorrectly.
@@ -666,6 +865,38 @@ useEffect(() => {
 		setPendingFile(file);
 	}
 
+	async function handleDeleteMessage(messageId: number) {
+		try {
+			await deleteMessage(messageId);
+			// Fetch the updated message from the database
+			const updatedMsg = await fetchMessageById(messageId);
+			if (updatedMsg) {
+				setMessages((prev) =>
+					prev.map((msg) => (msg.id === messageId ? updatedMsg : msg))
+				);
+			}
+		} catch (err) {
+			console.error('Failed to delete message:', err);
+			window.alert(`Failed to delete message: ${err instanceof Error ? err.message : 'Unknown error'}`);
+		}
+	}
+
+	async function handleEditMessage(messageId: number, newText: string) {
+		try {
+			await editMessage(messageId, newText, me);
+			// Fetch the updated message from the database
+			const updatedMsg = await fetchMessageById(messageId);
+			if (updatedMsg) {
+				setMessages((prev) =>
+					prev.map((msg) => (msg.id === messageId ? updatedMsg : msg))
+				);
+			}
+		} catch (err) {
+			console.error('Failed to edit message:', err);
+			window.alert(`Failed to edit message: ${err instanceof Error ? err.message : 'Unknown error'}`);
+		}
+	}
+
 	function handleInputChange(e: React.ChangeEvent<HTMLInputElement>) {
 		setText(e.target.value);
 		startTyping();
@@ -680,6 +911,49 @@ useEffect(() => {
 		if (isBottom) {
 			markAllAsRead();
 		}
+
+		// If user scrolled near the top, attempt to load older messages
+		if (el.scrollTop < 120 && !loadingOlderRef.current && hasMoreOlder) {
+			// load older messages
+			void (async () => {
+				const current = messagesRef.current;
+				if (!current) return;
+				const oldestId = messages.length ? messages[0].id : undefined;
+				if (!oldestId) return;
+				loadingOlderRef.current = true;
+				setLoadingOlder(true);
+				const prevScrollHeight = el.scrollHeight;
+				try {
+					const older = await fetchMessages(room.id, PAGE_SIZE, oldestId);
+					if (!older || older.length === 0) {
+						setHasMoreOlder(false);
+						loadingOlderRef.current = false;
+						setLoadingOlder(false);
+						return;
+					}
+					// map and prepend
+					const mapped = older.map((m) => enhanceIncomingMessage(m));
+					setMessages((prev) => {
+						const next = [...mapped, ...prev];
+						return sortMessages(next);
+					});
+					// if fewer than page size, no more older messages
+					if (older.length < PAGE_SIZE) setHasMoreOlder(false);
+				} catch (err) {
+					console.warn('Failed to load older messages', err);
+				} finally {
+					loadingOlderRef.current = false;
+					setLoadingOlder(false);
+					// restore scroll position after prepend
+					requestAnimationFrame(() => {
+						try {
+							const newScrollHeight = el.scrollHeight;
+							el.scrollTop = newScrollHeight - prevScrollHeight + el.scrollTop;
+						} catch (_) { }
+					});
+				}
+			})();
+		}
 	}
 
 	return (
@@ -688,16 +962,46 @@ useEffect(() => {
 				<div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
 					<button className="icon-button mobile-only" onClick={onOpenRooms} aria-label="Open rooms">
 						<svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-							<path d="M3 6h18M3 12h18M3 18h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+							<path d="M3 6h18M3 12h18M3 18h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
 						</svg>
 					</button>
-					<span>{room.room_name}</span>
+					<span style={{ display: 'flex', alignItems: 'center', gap: 8, position: 'relative' }}>
+						<span>{room.room_name}</span>
+						{/* Mood selector button */}
+						<button className="icon-button" aria-label="Select mood" onClick={() => setShowMoodPicker((v) => !v)} style={{ padding: 6 }}>
+							<span style={{ fontSize: 18 }}>{mood ?? '🙂'}</span>
+						</button>
+						{showMoodPicker && (
+							<div className="mood-picker" style={{ position: 'absolute', left: 48, top: 36, background: 'var(--wa-panel)', padding: 8, borderRadius: 8, display: 'flex', gap: 8, boxShadow: '0 6px 18px rgba(0,0,0,0.6)' }}>
+								{MOODS.map((m) => (
+									<button key={m.key} className="icon-button" onClick={() => selectMood(m.emoji)} title={m.label} aria-label={m.label} style={{ padding: 8 }}>
+										<span style={{ fontSize: 20 }}>{m.emoji}</span>
+									</button>
+								))}
+							</div>
+						)}
+					</span>
 				</div>
-				<div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+				<div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+					{/* Show current user's presented mood */}
+					{mood && (
+						<div className="my-mood" aria-live="polite" style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--wa-muted)', fontSize: 14 }}>
+							<span style={{ fontSize: 18 }}>{mood}</span>
+							<span style={{ opacity: 0.9 }}>{MOODS.find((m) => m.emoji === mood)?.label ?? 'Mood'}</span>
+						</div>
+					)}
 					<button className="button secondary" onClick={onLogout} aria-label="Logout">Logout</button>
 				</div>
 			</div>
 			<div className="messages" ref={messagesRef} onScroll={handleMessagesScroll}>
+				{loadingOlder && (
+					<div className="loading-older" style={{ padding: 8, textAlign: 'center', color: 'var(--wa-muted)' }}>
+						<span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+							<span className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" style={{ display: 'inline-block' }} />
+							<span style={{ fontSize: 13 }}>Loading older messages…</span>
+						</span>
+					</div>
+				)}
 				{messages.length === 0 && <div className="empty">Say hi 👋</div>}
 				{(() => {
 					const items: JSX.Element[] = [];
@@ -711,7 +1015,15 @@ useEffect(() => {
 							);
 							lastKey = key;
 						}
-						items.push(<MessageBubble key={m.id} me={me} msg={m} />);
+						items.push(
+							<MessageBubble
+								key={m.id}
+								me={me}
+								msg={m}
+								onEdit={handleEditMessage}
+								onDelete={handleDeleteMessage}
+							/>
+						);
 					}
 					return items;
 				})()}
@@ -727,7 +1039,7 @@ useEffect(() => {
 				<input type="file" ref={fileInputRef} style={{ display: 'none' }} onChange={onFileChange} />
 				<button className="icon-button" onClick={onPickFileClick} aria-label="Attach file">
 					<svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-						<path d="M21.44 11.05l-8.49 8.49a5.5 5.5 0 11-7.78-7.78l9.19-9.19a3.5 3.5 0 115 5l-9.19 9.19a1.5 1.5 0 01-2.12-2.12l8.49-8.49" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+						<path d="M21.44 11.05l-8.49 8.49a5.5 5.5 0 11-7.78-7.78l9.19-9.19a3.5 3.5 0 115 5l-9.19 9.19a1.5 1.5 0 01-2.12-2.12l8.49-8.49" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
 					</svg>
 				</button>
 				<div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -866,7 +1178,7 @@ export default function App() {
 						<div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
 							<button className="icon-button mobile-only" onClick={() => setShowRooms((v) => !v)} aria-label="Open rooms">
 								<svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-									<path d="M3 6h18M3 12h18M3 18h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+									<path d="M3 6h18M3 12h18M3 18h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
 								</svg>
 							</button>
 							<span>TalkDrop</span>

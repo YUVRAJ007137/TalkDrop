@@ -28,14 +28,33 @@ export async function deleteRoom(roomId: number): Promise<void> {
 	if (error) throw error;
 }
 
-export async function fetchMessages(roomId: number): Promise<ChatMessage[]> {
-	const { data, error } = await supabase
-		.from('messages')
-		.select('*')
-		.eq('room_id', roomId)
-		.order('id', { ascending: true });
-	if (error) throw error;
-	return (data ?? []) as ChatMessage[];
+/**
+ * Fetch messages with optional pagination.
+ * Returns messages in ascending order (oldest -> newest).
+ * If beforeId is provided, returns messages with id < beforeId (older messages).
+ * If beforeId is omitted, returns the latest `limit` messages.
+ */
+export async function fetchMessages(roomId: number, limit = 25, beforeId?: number): Promise<ChatMessage[]> {
+	// To get the latest `limit` messages, select ordered desc then reverse on client
+	try {
+		let query = supabase
+			.from('messages')
+			.select('*')
+			.eq('room_id', roomId)
+			.order('id', { ascending: false })
+			.limit(limit);
+		if (typeof beforeId === 'number') {
+			// fetch messages older than beforeId
+			query = query.lt('id', beforeId);
+		}
+		const { data, error } = await query;
+		if (error) throw error;
+		const rows = (data ?? []) as ChatMessage[];
+		// rows are in descending order; return ascending
+		return rows.slice().reverse();
+	} catch (err) {
+		throw err;
+	}
 }
 
 export async function sendMessage(roomId: number, username: string, message: string): Promise<void> {
@@ -43,9 +62,23 @@ export async function sendMessage(roomId: number, username: string, message: str
 	if (error) throw error;
 }
 
+export async function fetchMessageById(messageId: number): Promise<ChatMessage | null> {
+	const { data, error } = await supabase
+		.from('messages')
+		.select('*')
+		.eq('id', messageId)
+		.maybeSingle();
+	if (error) throw error;
+	return (data ?? null) as ChatMessage | null;
+}
+
 export type Unsubscribe = () => void;
 
-export function subscribeToRoomMessages(roomId: number, onInsert: (msg: ChatMessage) => void): Unsubscribe {
+export function subscribeToRoomMessages(
+	roomId: number,
+	onInsert: (msg: ChatMessage) => void,
+	onUpdate?: (msg: ChatMessage) => void
+): Unsubscribe {
 	const channel = supabase
 		.channel(`room:${roomId}`)
 		.on(
@@ -54,6 +87,14 @@ export function subscribeToRoomMessages(roomId: number, onInsert: (msg: ChatMess
 			(payload: { new: unknown }) => {
 				const newRow = payload.new as ChatMessage;
 				onInsert(newRow);
+			}
+		)
+		.on(
+			'postgres_changes',
+			{ event: 'UPDATE', schema: 'public', table: 'messages', filter: `room_id=eq.${roomId}` },
+			(payload: { new: unknown }) => {
+				const updatedRow = payload.new as ChatMessage;
+				onUpdate?.(updatedRow);
 			}
 		)
 		.subscribe();
@@ -100,5 +141,34 @@ export async function upsertReadReceipt(roomId: number, username: string, lastSe
 	const { error } = await supabase
 		.from('read_receipts')
 		.upsert({ room_id: roomId, username, last_seen_message_id: lastSeenMessageId }, { onConflict: 'room_id,username' });
+	if (error) throw error;
+}
+
+// Server-side persisted user moods ---------------------------------------
+// Table schema expected (example):
+// create table if not exists user_moods (
+//   username text primary key,
+//   mood text,
+//   updated_at timestamp with time zone default now()
+// );
+
+export type UserMood = { username: string; mood: string | null; updated_at?: string };
+
+export async function fetchUserMoods(usernames: string[]): Promise<UserMood[]> {
+	if (!usernames || !usernames.length) return [];
+	const { data, error } = await supabase.from('user_moods').select('username, mood, updated_at').in('username', usernames);
+	if (error) throw error;
+	return (data ?? []) as UserMood[];
+}
+
+export async function upsertUserMood(username: string, mood: string | null): Promise<void> {
+	if (!username) return;
+	if (mood === null) {
+		// remove mood if explicitly cleared
+		const { error } = await supabase.from('user_moods').delete().eq('username', username);
+		if (error) throw error;
+		return;
+	}
+	const { error } = await supabase.from('user_moods').upsert({ username, mood }, { onConflict: 'username' });
 	if (error) throw error;
 }

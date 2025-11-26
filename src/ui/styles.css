@@ -126,6 +126,12 @@
 	@apply font-semibold text-sm text-[var(--wa-text)] truncate;
 }
 
+.presence-mood {
+	@apply text-lg leading-none;
+}
+
+/* removed .my-status (self-status moved/removed) */
+
 .presence-status {
 	@apply text-base flex-shrink-0;
 }
