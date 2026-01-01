@@ -883,7 +883,13 @@ useEffect(() => {
 
 	async function handleEditMessage(messageId: number, newText: string) {
 		try {
-			await editMessage(messageId, newText, me);
+			// preserve the same stored payload format (JSON string) for text messages
+			// find the message in local state to extract clientId if present
+			const existing = messages.find((m) => m.id === messageId);
+			const clientId = existing?.clientId;
+			const payload = makeTextMessage(newText, clientId);
+
+			await editMessage(messageId, payload, me);
 			// Fetch the updated message from the database
 			const updatedMsg = await fetchMessageById(messageId);
 			if (updatedMsg) {
