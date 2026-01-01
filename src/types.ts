@@ -16,6 +16,7 @@ export type ChatMessage = {
 	clientId?: string;
 	is_deleted?: boolean; // soft-delete flag
 	edited_at?: string; // timestamp when message was edited
+	is_edited?: boolean; // true when message has been edited
 	original_message?: string; // original message before edit
 };
 

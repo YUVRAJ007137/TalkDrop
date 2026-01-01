@@ -27,7 +27,7 @@ export async function editMessage(messageId: number, newMessage: string, usernam
 	const originalMsg = msg?.original_message ?? msg?.message ?? '';
 	const { error } = await supabase
 		.from('messages')
-		.update({ message: newMessage, edited_at: new Date().toISOString(), original_message: originalMsg })
+		.update({ message: newMessage, edited_at: new Date().toISOString(), original_message: originalMsg, is_edited: true })
 		.eq('id', messageId);
 	if (error) throw error;
 	
