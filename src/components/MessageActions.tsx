@@ -2,29 +2,30 @@ import { useState } from 'react';
 
 interface MessageActionsProps {
 	messageId: number;
+	username: string;
 	messageText: string;
+	messageSnippet: string; // preview for reply (e.g. text slice or "Attachment")
 	isSelf: boolean;
 	editedAt?: string;
-	onDelete: (messageId: number) => void;
-	onEdit: (messageId: number, newText: string) => void;
+	onReply?: (messageId: number, username: string, snippet: string) => void;
+	onDelete?: (messageId: number) => void;
+	onEdit?: (messageId: number, newText: string) => void;
 }
 
-export function MessageActions({ messageId, messageText, isSelf, editedAt, onDelete, onEdit }: MessageActionsProps) {
+export function MessageActions({ messageId, username, messageText, messageSnippet, isSelf, editedAt, onReply, onDelete, onEdit }: MessageActionsProps) {
 	const [showMenu, setShowMenu] = useState(false);
 	const [isEditing, setIsEditing] = useState(false);
 	const [editText, setEditText] = useState(messageText);
 
-	if (!isSelf) return null; // only show for own messages
-
 	const handleDelete = () => {
-		if (window.confirm('Delete this message?')) {
+		if (onDelete && window.confirm('Delete this message?')) {
 			onDelete(messageId);
 			setShowMenu(false);
 		}
 	};
 
 	const handleEditSave = () => {
-		if (editText.trim() && editText !== messageText) {
+		if (onEdit && editText.trim() && editText !== messageText) {
 			onEdit(messageId, editText.trim());
 			setIsEditing(false);
 			setShowMenu(false);
@@ -114,45 +115,72 @@ export function MessageActions({ messageId, messageText, isSelf, editedAt, onDel
 						minWidth: 100
 					}}
 				>
-					<button
-						onClick={() => {
-							setIsEditing(true);
-							setShowMenu(false);
-						}}
-						style={{
-							display: 'block',
-							width: '100%',
-							padding: '6px 8px',
-							textAlign: 'left',
-							fontSize: 12,
-							backgroundColor: 'transparent',
-							border: 'none',
-							color: 'var(--wa-text)',
-							cursor: 'pointer'
-						}}
-						onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = 'var(--wa-panel)')}
-						onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
-					>
-						Edit
-					</button>
-					<button
-						onClick={handleDelete}
-						style={{
-							display: 'block',
-							width: '100%',
-							padding: '6px 8px',
-							textAlign: 'left',
-							fontSize: 12,
-							backgroundColor: 'transparent',
-							border: 'none',
-							color: '#d9534f',
-							cursor: 'pointer'
-						}}
-						onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = 'var(--wa-panel)')}
-						onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
-					>
-						Delete
-					</button>
+					{onReply && (
+						<button
+							onClick={() => {
+								onReply(messageId, username, messageSnippet);
+								setShowMenu(false);
+							}}
+							style={{
+								display: 'block',
+								width: '100%',
+								padding: '6px 8px',
+								textAlign: 'left',
+								fontSize: 12,
+								backgroundColor: 'transparent',
+								border: 'none',
+								color: 'var(--wa-text)',
+								cursor: 'pointer'
+							}}
+							onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = 'var(--wa-panel)')}
+							onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
+						>
+							Reply
+						</button>
+					)}
+					{isSelf && (
+						<button
+							onClick={() => {
+								setIsEditing(true);
+								setShowMenu(false);
+							}}
+							style={{
+								display: 'block',
+								width: '100%',
+								padding: '6px 8px',
+								textAlign: 'left',
+								fontSize: 12,
+								backgroundColor: 'transparent',
+								border: 'none',
+								color: 'var(--wa-text)',
+								cursor: 'pointer'
+							}}
+							onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = 'var(--wa-panel)')}
+							onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
+						>
+							Edit
+						</button>
+					)}
+					{isSelf && (
+						<button
+							onClick={handleDelete}
+							style={{
+								display: 'block',
+								width: '100%',
+								padding: '6px 8px',
+								textAlign: 'left',
+								fontSize: 12,
+								backgroundColor: 'transparent',
+								border: 'none',
+								color: '#d9534f',
+								cursor: 'pointer'
+							}}
+							onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = 'var(--wa-panel)')}
+							onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
+						>
+							Delete
+						</button>
+					)}
 				</div>
 			)}
 			{editedAt && (

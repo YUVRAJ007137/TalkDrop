@@ -18,6 +18,8 @@ export type ChatMessage = {
 	edited_at?: string; // timestamp when message was edited
 	is_edited?: boolean; // true when message has been edited
 	original_message?: string; // original message before edit
+	reply_to_id?: number | null;
+	reply_to_username?: string | null;
 };
 
 export type UserPresence = {

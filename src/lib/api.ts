@@ -57,8 +57,18 @@ export async function fetchMessages(roomId: number, limit = 25, beforeId?: numbe
 	}
 }
 
-export async function sendMessage(roomId: number, username: string, message: string): Promise<void> {
-	const { error } = await supabase.from('messages').insert({ room_id: roomId, username, message });
+export async function sendMessage(
+	roomId: number,
+	username: string,
+	message: string,
+	replyTo?: { id: number; username: string } | null
+): Promise<void> {
+	const row: Record<string, unknown> = { room_id: roomId, username, message };
+	if (replyTo) {
+		row.reply_to_id = replyTo.id;
+		row.reply_to_username = replyTo.username;
+	}
+	const { error } = await supabase.from('messages').insert(row);
 	if (error) throw error;
 }
 

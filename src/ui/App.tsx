@@ -29,6 +29,14 @@ function sortMessages(list: ChatMessage[]): ChatMessage[] {
 		return timeA - timeB;
 	});
 }
+
+/** Preview text for a message (reply bar and quote block). */
+function getMessageSnippet(msg: ChatMessage): string {
+	if (msg.is_deleted) return 'Message deleted';
+	const p = parseMessagePayload(msg.message);
+	if (p.kind === 'text') return p.text.slice(0, 80);
+	return p.name?.slice(0, 40) ?? 'Attachment';
+}
 import { createRoom, deleteRoom, fetchMessages, fetchRoomByName, fetchRooms, sendMessage, subscribeToRoomMessages, uploadFile } from '../lib/api';
 
 function Onboard({ onSet }: { onSet: (name: string) => void }) {
@@ -124,7 +132,21 @@ function MessageStatusIcon({ status }: { status?: MessageStatus }) {
 	);
 }
 
-function MessageBubble({ me, msg, onEdit, onDelete }: { me: string; msg: ChatMessage; onEdit?: (id: number, text: string) => void; onDelete?: (id: number) => void }) {
+function MessageBubble({
+	me,
+	msg,
+	allMessages,
+	onReply,
+	onEdit,
+	onDelete
+}: {
+	me: string;
+	msg: ChatMessage;
+	allMessages: ChatMessage[];
+	onReply?: (messageId: number, username: string, snippet: string) => void;
+	onEdit?: (id: number, text: string) => void;
+	onDelete?: (id: number) => void;
+}) {
 	const payload = useMemo(() => parseMessagePayload(msg.message), [msg.message]);
 	const isSelf = msg.username === me;
 	const rawTs = msg.timestamp ?? Date.now();
@@ -132,6 +154,7 @@ function MessageBubble({ me, msg, onEdit, onDelete }: { me: string; msg: ChatMes
 		? new Date(rawTs.endsWith('Z') ? rawTs : rawTs + 'Z')
 		: new Date(rawTs);
 	const timeIST = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Asia/Kolkata' }).format(normalizedDate);
+	const replyToMsg = msg.reply_to_id != null ? allMessages.find((m) => m.id === msg.reply_to_id) : null;
 
 	if (msg.is_deleted) {
 		return (
@@ -148,6 +171,24 @@ function MessageBubble({ me, msg, onEdit, onDelete }: { me: string; msg: ChatMes
 	return (
 		<div className={`message ${isSelf ? 'self' : ''}`} style={{ position: 'relative' }}>
 			<div style={{ fontWeight: 600, marginBottom: 4 }}>{msg.username}</div>
+			{msg.reply_to_id != null && (
+				<div
+					className="message-reply-quote"
+					style={{
+						borderLeft: '3px solid var(--wa-accent, #00a884)',
+						paddingLeft: 8,
+						marginBottom: 6,
+						opacity: 0.95
+					}}
+				>
+					<div style={{ fontSize: 12, color: 'var(--wa-muted)', fontWeight: 600 }}>
+						{msg.reply_to_username ?? replyToMsg?.username ?? 'Unknown'}
+					</div>
+					<div style={{ fontSize: 13, color: 'var(--wa-text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+						{replyToMsg ? getMessageSnippet(replyToMsg) : 'Message unavailable'}
+					</div>
+				</div>
+			)}
 			{payload.kind === 'text' && (
 				<div>
 					<div>{payload.text}</div>
@@ -178,16 +219,17 @@ function MessageBubble({ me, msg, onEdit, onDelete }: { me: string; msg: ChatMes
 					<span>{timeIST}</span>
 					{isSelf && <MessageStatusIcon status={msg.status} />}
 				</div>
-				{isSelf && onEdit && onDelete && (
-					<MessageActions
-						messageId={msg.id}
-						messageText={payload.kind === 'text' ? (payload as any).text : ''}
-						isSelf={isSelf}
-						editedAt={msg.edited_at}
-						onEdit={onEdit}
-						onDelete={onDelete}
-					/>
-				)}
+				<MessageActions
+					messageId={msg.id}
+					username={msg.username}
+					messageText={payload.kind === 'text' ? (payload as { text: string }).text : ''}
+					messageSnippet={getMessageSnippet(msg)}
+					isSelf={isSelf}
+					editedAt={msg.edited_at}
+					onReply={onReply}
+					onEdit={onEdit}
+					onDelete={onDelete}
+				/>
 			</div>
 		</div>
 	);
@@ -196,6 +238,7 @@ function MessageBubble({ me, msg, onEdit, onDelete }: { me: string; msg: ChatMes
 function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room; me: string; refreshKey: number; onOpenRooms: () => void; onLogout: () => void }) {
 	const [messages, setMessages] = useState<ChatMessage[]>([]);
 	const [text, setText] = useState('');
+	const [replyingTo, setReplyingTo] = useState<{ id: number; username: string; snippet: string } | null>(null);
 	const [pendingFile, setPendingFile] = useState<File | null>(null);
 	const fileInputRef = useRef<HTMLInputElement | null>(null);
 	const messagesRef = useRef<HTMLDivElement | null>(null);
@@ -480,6 +523,7 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 	// When switching rooms or forcing refresh, ensure we reset and do the initial jump-to-bottom again
 	useEffect(() => {
 		setMessages([]); // clear to avoid cross-room residue
+		setReplyingTo(null);
 		didInitialScrollRef.current = false;
 		setIsNearBottom(true);
 		lastSeenMessageIdRef.current = 0;
@@ -817,10 +861,11 @@ useEffect(() => {
 			};
 			setMessages((prev) => sortMessages([...prev, optimisticMessage]));
 			try {
-				await sendMessage(room.id, me, payload);
+				await sendMessage(room.id, me, payload, replyingTo ? { id: replyingTo.id, username: replyingTo.username } : null);
 				setMessages((prev) =>
 					prev.map((msg) => (msg.clientId === clientId && msg.status === 'sending' ? { ...msg, status: 'delivered' } : msg))
 				);
+				setReplyingTo(null);
 			} catch (err) {
 				console.error('Failed to send message:', err);
 				setMessages((prev) => prev.filter((msg) => msg.clientId !== clientId));
@@ -838,8 +883,9 @@ useEffect(() => {
 				]);
 				const clientId = createClientId();
 				const payload = makeFileMessage(uploaded.url, uploaded.mime, uploaded.name, clientId);
-				await sendMessage(room.id, me, payload);
+				await sendMessage(room.id, me, payload, replyingTo ? { id: replyingTo.id, username: replyingTo.username } : null);
 				setUploadStatus('');
+				setReplyingTo(null);
 			} catch (err) {
 				console.error('Upload failed:', err);
 				setUploadStatus('Upload failed');
@@ -1026,6 +1072,8 @@ useEffect(() => {
 								key={m.id}
 								me={me}
 								msg={m}
+								allMessages={messages}
+								onReply={(id, username, snippet) => setReplyingTo({ id, username, snippet })}
 								onEdit={handleEditMessage}
 								onDelete={handleDeleteMessage}
 							/>
@@ -1042,6 +1090,35 @@ useEffect(() => {
 				</div>
 			)}
 			<div className="input-row">
+				{replyingTo && (
+					<div
+						className="reply-preview"
+						style={{
+							display: 'flex',
+							alignItems: 'center',
+							gap: 8,
+							padding: '6px 10px',
+							background: 'var(--wa-panel-light, rgba(255,255,255,0.06))',
+							borderRadius: 8,
+							marginBottom: 6,
+							borderLeft: '3px solid var(--wa-accent, #00a884)'
+						}}
+					>
+						<div style={{ flex: 1, minWidth: 0 }}>
+							<div style={{ fontSize: 12, color: 'var(--wa-muted)', fontWeight: 600 }}>Replying to {replyingTo.username}</div>
+							<div style={{ fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{replyingTo.snippet}</div>
+						</div>
+						<button
+							type="button"
+							className="icon-button"
+							onClick={() => setReplyingTo(null)}
+							aria-label="Cancel reply"
+							style={{ padding: 4, flexShrink: 0 }}
+						>
+							×
+						</button>
+					</div>
+				)}
 				<input type="file" ref={fileInputRef} style={{ display: 'none' }} onChange={onFileChange} />
 				<button className="icon-button" onClick={onPickFileClick} aria-label="Attach file">
 					<svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
