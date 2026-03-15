@@ -1034,14 +1034,14 @@ useEffect(() => {
 	return (
 		<div className="main">
 			<div className="chat-header">
-				<div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+				<div className="chat-header-left">
 					<button className="icon-button mobile-only" onClick={onOpenRooms} aria-label="Open rooms">
 						<svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
 							<path d="M3 6h18M3 12h18M3 18h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
 						</svg>
 					</button>
-					<span style={{ display: 'flex', alignItems: 'center', gap: 8, position: 'relative' }}>
-						<span>{room.room_name}</span>
+					<span className="chat-header-title" title={room.room_name}>{room.room_name}</span>
+					<span style={{ display: 'flex', alignItems: 'center', gap: 8, position: 'relative', flexShrink: 0 }}>
 						<button
 							type="button"
 							className="icon-button"
@@ -1174,7 +1174,7 @@ useEffect(() => {
 						)}
 					</span>
 				</div>
-				<div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+				<div className="chat-header-actions">
 					{/* Show current user's presented mood */}
 					{mood && (
 						<div className="my-mood" aria-live="polite" style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--wa-muted)', fontSize: 14 }}>
@@ -1528,15 +1528,15 @@ export default function App() {
 			) : (
 				<div className="main">
 					<div className="chat-header">
-						<div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+						<div className="chat-header-left">
 							<button className="icon-button mobile-only" onClick={() => setShowRooms((v) => !v)} aria-label="Open rooms">
 								<svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
 									<path d="M3 6h18M3 12h18M3 18h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
 								</svg>
 							</button>
-							<span>TalkDrop</span>
+							<span className="chat-header-title">TalkDrop</span>
 						</div>
-						<div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+						<div className="chat-header-actions">
 							<button className="button secondary" onClick={handleLogout} aria-label="Logout">Logout</button>
 						</div>
 					</div>
@@ -1562,12 +1562,32 @@ function VideoCallOverlay({
 }) {
 	const remoteRef = useRef<HTMLVideoElement | null>(null);
 	const localRef = useRef<HTMLVideoElement | null>(null);
+
 	useEffect(() => {
-		if (remoteRef.current && remoteStream) remoteRef.current.srcObject = remoteStream;
+		const el = remoteRef.current;
+		if (el && remoteStream) {
+			el.srcObject = remoteStream;
+		}
 	}, [remoteStream]);
+
 	useEffect(() => {
-		if (localRef.current && localStream) localRef.current.srcObject = localStream;
+		const el = localRef.current;
+		if (el && localStream) {
+			el.srcObject = localStream;
+		}
 	}, [localStream]);
+
+	// Callback ref so we attach local stream as soon as the element is mounted (ref can lag behind state)
+	const setLocalRef = useCallback(
+		(el: HTMLVideoElement | null) => {
+			localRef.current = el;
+			if (el && localStream) {
+				el.srcObject = localStream;
+			}
+		},
+		[localStream]
+	);
+
 	return (
 		<div className="fixed inset-0 z-50 flex flex-col bg-[#0b141a]">
 			<div style={{ flex: 1, display: 'flex', flexWrap: 'wrap', gap: 8, padding: 12, position: 'relative' }}>
@@ -1581,12 +1601,12 @@ function VideoCallOverlay({
 				)}
 				{!isConnected && (
 					<div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 1, color: 'var(--wa-muted)' }}>
-						Calling {remoteUsername}…
+						Connecting to {remoteUsername}…
 					</div>
 				)}
 				{localStream && (
 					<video
-						ref={localRef}
+						ref={setLocalRef}
 						autoPlay
 						playsInline
 						muted
@@ -1612,8 +1632,12 @@ function JoinRoomGate({ room, onSubmit, onCancel }: { room: Room; onSubmit: (pas
 	return (
 		<div className="main">
 			<div className="chat-header">
-				<span>TalkDrop</span>
-				<button type="button" className="button secondary" onClick={onCancel} aria-label="Cancel">Cancel</button>
+				<div className="chat-header-left">
+					<span className="chat-header-title">TalkDrop</span>
+				</div>
+				<div className="chat-header-actions">
+					<button type="button" className="button secondary" onClick={onCancel} aria-label="Cancel">Cancel</button>
+				</div>
 			</div>
 			<div style={{ padding: 24, maxWidth: 360, margin: '0 auto' }}>
 				<h2 style={{ fontSize: 18, marginBottom: 8 }}>Join room: {room.room_name}</h2>

@@ -20,14 +20,18 @@
 @layer components {
 	.app { @apply grid h-full; grid-template-columns: 360px 1fr; }
 	.sidebar { @apply bg-[var(--wa-panel)] border-r border-[#1f2c33] flex flex-col; }
-	.header { @apply px-4 py-3 bg-[var(--wa-panel-light)] font-semibold flex items-center justify-between; }
+	.header { @apply px-4 py-3 bg-[var(--wa-panel-light)] font-semibold flex items-center justify-between gap-2; min-height: 52px; }
+	.sidebar .header > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.rooms { @apply flex-1 overflow-y-auto; }
 	/* keep sidebar height fixed; allow list to scroll within */
 	.sidebar { @apply bg-[var(--wa-panel)] border-r border-[#1f2c33] flex flex-col h-full; }
 	.room-item { @apply px-4 py-3 border-b border-[#1f2c33] cursor-pointer hover:bg-[#22313a]; }
 	.active { @apply bg-[#1f2c33]; }
 	.main { @apply bg-[var(--wa-bg-dark)] flex flex-col min-h-0; }
-	.chat-header { @apply sticky top-0 z-30 px-4 py-3 bg-[var(--wa-panel-light)] font-semibold flex items-center justify-between; }
+	.chat-header { @apply sticky top-0 z-30 px-4 py-3 bg-[var(--wa-panel-light)] font-semibold flex items-center justify-between gap-2; flex-wrap: nowrap; min-height: 52px; }
+	.chat-header-left { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8; overflow: hidden; }
+	.chat-header-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 1; min-width: 0; }
+	.chat-header-actions { flex-shrink: 0; display: flex; align-items: center; gap: 8; }
 	/* Improve mobile visibility and avoid notch overlap */
 	.chat-header { top: env(safe-area-inset-top, 0px); z-index: 50; padding-top: calc(env(safe-area-inset-top, 0px) + 0.75rem); }
 	.messages { @apply flex-1 overflow-y-auto p-4 pb-20 flex flex-col gap-2; }
@@ -74,7 +78,12 @@
 		.button { @apply px-3 py-1 text-sm; }
 		.button.secondary { @apply px-2 py-1; }
 		.button.danger { @apply px-2 py-1; }
-		.chat-header { @apply px-3 py-2; }
+		.chat-header { @apply px-2 py-2 gap-1; min-height: 48px; }
+		.chat-header-left { gap: 4; }
+		.chat-header .icon-button { padding: 4px !important; min-width: 32px; min-height: 32px; }
+		.chat-header .icon-button svg { width: 16px; height: 16px; }
+		.chat-header-title { font-size: 0.9375rem; }
+		.chat-header-actions .my-mood { display: none; }
 		.onboard { @apply mt-8 p-4 max-w-[95vw]; }
 		.onboard h1 { @apply text-lg; }
 	}
@@ -93,7 +102,12 @@
 		.timestamp { @apply text-xs; }
 		.file-thumb { @apply max-w-[200px]; }
 		.messages { @apply p-2 pb-16; }
-		.chat-header { @apply px-2 py-2; }
+		.chat-header { @apply px-2 py-1.5; min-height: 44px; }
+		.chat-header-left { gap: 2; }
+		.chat-header .icon-button { padding: 4px !important; min-width: 28px; min-height: 28px; }
+		.chat-header .icon-button svg { width: 14px; height: 14px; }
+		.chat-header-title { font-size: 0.875rem; }
+		.chat-header .button.secondary { padding: 4px 8px; font-size: 0.75rem; }
 	}
 } 
 .spinner { @apply w-4 h-4 border-2 border-white border-opacity-30 border-t-white rounded-full animate-spin; }
