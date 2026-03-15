@@ -105,7 +105,8 @@ export function createVideoCallHandler(
 					cleanup();
 					setState({ state: 'ended', error: err.message });
 				});
-				setState({ state: 'incoming', remoteUsername: from, localStream: stream });
+				// Show call overlay (connecting) so modal closes and user sees local video
+				setState({ state: 'calling', remoteUsername: from, localStream: stream });
 			},
 			(err) => {
 				setState({ state: 'idle', error: err.message || 'Could not access camera/microphone' });
@@ -145,9 +146,10 @@ export function createVideoCallHandler(
 	function subscribe() {
 		if (channel) return;
 		channel = createCallChannel(roomId);
-		(channel as any).on('broadcast', { event: EVENT }, (p: { payload?: SignalingPayload }) => {
-			const payload = p.payload;
-			if (!payload || payload.to !== myUsername) return;
+		(channel as any).on('broadcast', { event: EVENT }, (p: { payload?: SignalingPayload } & Record<string, unknown>) => {
+			// Supabase may pass payload at p.payload or at top level
+			const payload = (p?.payload ?? p) as SignalingPayload | undefined;
+			if (!payload || typeof payload !== 'object' || !('to' in payload) || payload.to !== myUsername) return;
 			switch (payload.type) {
 				case 'call-request':
 					handleIncoming(payload.from);
@@ -163,7 +165,9 @@ export function createVideoCallHandler(
 					}
 					break;
 				case 'signal':
-					handleSignal(payload.from, payload.to, payload.data);
+					if ('data' in payload && payload.data != null) {
+						handleSignal(payload.from, payload.to, payload.data);
+					}
 					break;
 				case 'hangup':
 					if (remoteUsername === payload.from) {
@@ -173,7 +177,34 @@ export function createVideoCallHandler(
 					break;
 			}
 		});
-		channel.subscribe();
+		(channel as any).subscribe?.((status: string) => {
+			subscribeCallback?.(status);
+		});
+	}
+
+	let subscribeCallback: ((status: string) => void) | null = null;
+
+	function subscribeAsync(): Promise<void> {
+		return new Promise((resolve) => {
+			if (channel) {
+				resolve();
+				return;
+			}
+			subscribeCallback = (status: string) => {
+				if (status === 'SUBSCRIBED') {
+					subscribeCallback = null;
+					resolve();
+				}
+			};
+			subscribe();
+			// Fallback: resolve after 3s so we don't block forever
+			setTimeout(() => {
+				if (subscribeCallback) {
+					subscribeCallback = null;
+					resolve();
+				}
+			}, 3000);
+		});
 	}
 
 	function unsubscribe() {
@@ -186,9 +217,9 @@ export function createVideoCallHandler(
 	}
 
 	async function startCall(to: string) {
-		subscribe();
 		remoteUsername = to;
 		setState({ state: 'calling', remoteUsername: to });
+		await subscribeAsync();
 		send({ type: 'call-request', from: myUsername, to });
 		// Peer is created when we receive call-accept (handleAcceptAsCaller)
 	}
