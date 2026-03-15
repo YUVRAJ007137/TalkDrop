@@ -40,6 +40,7 @@ function getMessageSnippet(msg: ChatMessage): string {
 import { createRoom, deleteRoom, fetchMessages, fetchRoomById, fetchRoomByName, fetchRooms, sendMessage, subscribeToRoomMessages, uploadFile } from '../lib/api';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { QRCodeSVG } from 'qrcode.react';
+import { useVideoCall } from '../lib/videoCall';
 
 const ROOM_BASE_URL = (import.meta.env.VITE_APP_PUBLIC_URL as string) || 'https://talk-drop.vercel.app';
 
@@ -287,6 +288,9 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout, isNewlyCreated,
 	}
 	const [showMoodPicker, setShowMoodPicker] = useState(false);
 	const [showQr, setShowQr] = useState(false);
+	const [showVideoCallMenu, setShowVideoCallMenu] = useState(false);
+	const videoCall = useVideoCall(room.id, me);
+	const otherUsers = userPresence.filter((u) => u.username !== me);
 
 	const MOODS: Array<{ key: string; emoji: string; label: string }> = [
 		{ key: 'happy', emoji: '😊', label: 'Happy' },
@@ -1107,6 +1111,54 @@ useEffect(() => {
 								</div>
 							</>
 						)}
+						{/* Video call button */}
+						<div style={{ position: 'relative' }}>
+							<button
+								type="button"
+								className="icon-button"
+								aria-label="Video call"
+								title="Video call"
+								onClick={() => setShowVideoCallMenu((v) => !v)}
+								style={{ padding: 6 }}
+								disabled={otherUsers.length === 0}
+							>
+								<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+									<path d="M23 7l-7 5 7 5V7z" />
+									<rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+								</svg>
+							</button>
+							{showVideoCallMenu && (
+								<>
+									<div className="backdrop" style={{ zIndex: 18 }} onClick={() => setShowVideoCallMenu(false)} aria-hidden />
+									<div
+										style={{
+											position: 'absolute',
+											left: 0,
+											top: 36,
+											background: 'var(--wa-panel)',
+											borderRadius: 8,
+											boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
+											zIndex: 20,
+											minWidth: 160,
+											padding: '6px 0'
+										}}
+									>
+										<div style={{ padding: '6px 12px', fontSize: 12, color: 'var(--wa-muted)' }}>Call a user</div>
+										{otherUsers.map((u) => (
+											<button
+												key={u.username}
+												type="button"
+												className="button secondary"
+												style={{ display: 'block', width: '100%', textAlign: 'left', borderRadius: 0, fontSize: 13 }}
+												onClick={() => { videoCall.startCall(u.username); setShowVideoCallMenu(false); }}
+											>
+												{u.isOnline ? '🟢' : '⚪'} {u.username}
+											</button>
+										))}
+									</div>
+								</>
+							)}
+						</div>
 						{/* Mood selector button */}
 						<button className="icon-button" aria-label="Select mood" onClick={() => setShowMoodPicker((v) => !v)} style={{ padding: 6 }}>
 							<span style={{ fontSize: 18 }}>{mood ?? '🙂'}</span>
@@ -1241,6 +1293,34 @@ useEffect(() => {
 				<div className="fixed inset-0 z-40 bg-black/40 backdrop-blur-sm flex flex-col items-center justify-center gap-3">
 					<div className="w-10 h-10 border-4 border-white/30 border-t-white rounded-full animate-spin" />
 					{uploadStatus && <div className="text-sm text-[var(--wa-text)] opacity-90">{uploadStatus}</div>}
+				</div>
+			)}
+			{/* Incoming video call */}
+			{videoCall.state.state === 'incoming' && videoCall.state.remoteUsername && (
+				<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+					<div style={{ background: 'var(--wa-panel)', padding: 24, borderRadius: 16, textAlign: 'center', maxWidth: 320 }}>
+						<div style={{ fontSize: 18, fontWeight: 600, marginBottom: 8 }}>Incoming video call</div>
+						<div style={{ color: 'var(--wa-muted)', marginBottom: 20 }}>from {videoCall.state.remoteUsername}</div>
+						<div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>
+							<button type="button" className="button" onClick={() => videoCall.acceptCall(videoCall.state.remoteUsername!)}>Accept</button>
+							<button type="button" className="button danger" onClick={() => videoCall.rejectCall(videoCall.state.remoteUsername!)}>Decline</button>
+						</div>
+					</div>
+				</div>
+			)}
+			{/* Calling / connected video overlay */}
+			{(videoCall.state.state === 'calling' || videoCall.state.state === 'connected') && (
+				<VideoCallOverlay
+					remoteStream={videoCall.state.remoteStream}
+					localStream={videoCall.state.localStream}
+					remoteUsername={videoCall.state.remoteUsername}
+					isConnected={videoCall.state.state === 'connected'}
+					onHangup={videoCall.hangup}
+				/>
+			)}
+			{videoCall.state.error && (
+				<div className="fixed bottom-4 left-1/2 z-50" style={{ transform: 'translateX(-50%)', background: 'var(--wa-panel)', padding: '8px 16px', borderRadius: 8, fontSize: 13, color: '#e74c3c' }}>
+					{videoCall.state.error}
 				</div>
 			)}
 		</div>
@@ -1463,6 +1543,62 @@ export default function App() {
 					<div className="empty">Join or create a room</div>
 				</div>
 			)}
+		</div>
+	);
+}
+
+function VideoCallOverlay({
+	remoteStream,
+	localStream,
+	remoteUsername,
+	isConnected,
+	onHangup
+}: {
+	remoteStream: MediaStream | null;
+	localStream: MediaStream | null;
+	remoteUsername: string | null;
+	isConnected: boolean;
+	onHangup: () => void;
+}) {
+	const remoteRef = useRef<HTMLVideoElement | null>(null);
+	const localRef = useRef<HTMLVideoElement | null>(null);
+	useEffect(() => {
+		if (remoteRef.current && remoteStream) remoteRef.current.srcObject = remoteStream;
+	}, [remoteStream]);
+	useEffect(() => {
+		if (localRef.current && localStream) localRef.current.srcObject = localStream;
+	}, [localStream]);
+	return (
+		<div className="fixed inset-0 z-50 flex flex-col bg-[#0b141a]">
+			<div style={{ flex: 1, display: 'flex', flexWrap: 'wrap', gap: 8, padding: 12, position: 'relative' }}>
+				{remoteStream && (
+					<video
+						ref={remoteRef}
+						autoPlay
+						playsInline
+						style={{ width: '100%', height: '100%', objectFit: 'contain', maxHeight: 'calc(100vh - 80px)' }}
+					/>
+				)}
+				{!isConnected && (
+					<div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 1, color: 'var(--wa-muted)' }}>
+						Calling {remoteUsername}…
+					</div>
+				)}
+				{localStream && (
+					<video
+						ref={localRef}
+						autoPlay
+						playsInline
+						muted
+						style={{ width: 160, height: 120, objectFit: 'cover', borderRadius: 8, position: 'absolute', bottom: 80, right: 12, border: '2px solid var(--wa-muted)' }}
+					/>
+				)}
+			</div>
+			<div style={{ padding: 12, display: 'flex', justifyContent: 'center', background: 'var(--wa-panel)' }}>
+				<button type="button" className="button danger" onClick={onHangup}>
+					End call
+				</button>
+			</div>
 		</div>
 	);
 }
