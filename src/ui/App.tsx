@@ -37,7 +37,11 @@ function getMessageSnippet(msg: ChatMessage): string {
 	if (p.kind === 'text') return p.text.slice(0, 80);
 	return p.name?.slice(0, 40) ?? 'Attachment';
 }
-import { createRoom, deleteRoom, fetchMessages, fetchRoomByName, fetchRooms, sendMessage, subscribeToRoomMessages, uploadFile } from '../lib/api';
+import { createRoom, deleteRoom, fetchMessages, fetchRoomById, fetchRoomByName, fetchRooms, sendMessage, subscribeToRoomMessages, uploadFile } from '../lib/api';
+import { useNavigate, useLocation } from 'react-router-dom';
+import { QRCodeSVG } from 'qrcode.react';
+
+const ROOM_BASE_URL = (import.meta.env.VITE_APP_PUBLIC_URL as string) || 'https://talk-drop.vercel.app';
 
 function Onboard({ onSet }: { onSet: (name: string) => void }) {
 	const [name, setName] = useState('');
@@ -235,8 +239,9 @@ function MessageBubble({
 	);
 }
 
-function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room; me: string; refreshKey: number; onOpenRooms: () => void; onLogout: () => void }) {
+function ChatView({ room, me, refreshKey, onOpenRooms, onLogout, isNewlyCreated, onFirstMessage }: { room: Room; me: string; refreshKey: number; onOpenRooms: () => void; onLogout: () => void; isNewlyCreated?: boolean; onFirstMessage?: () => void }) {
 	const [messages, setMessages] = useState<ChatMessage[]>([]);
+	const hasNotifiedFirstMessageRef = useRef(false);
 	const [text, setText] = useState('');
 	const [replyingTo, setReplyingTo] = useState<{ id: number; username: string; snippet: string } | null>(null);
 	const [pendingFile, setPendingFile] = useState<File | null>(null);
@@ -281,6 +286,7 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 		try { setStoredMood(emoji); } catch { /* ignore */ }
 	}
 	const [showMoodPicker, setShowMoodPicker] = useState(false);
+	const [showQr, setShowQr] = useState(false);
 
 	const MOODS: Array<{ key: string; emoji: string; label: string }> = [
 		{ key: 'happy', emoji: '😊', label: 'Happy' },
@@ -548,6 +554,19 @@ function ChatView({ room, me, refreshKey, onOpenRooms, onLogout }: { room: Room;
 	useEffect(() => {
 		messagesStateRef.current = messages;
 	}, [messages]);
+
+	// Reset first-message flag when switching rooms
+	useEffect(() => {
+		hasNotifiedFirstMessageRef.current = false;
+	}, [room.id]);
+
+	// After first message in a newly created room, notify parent so QR is dismissed
+	useEffect(() => {
+		if (isNewlyCreated && onFirstMessage && messages.length > 0 && !hasNotifiedFirstMessageRef.current) {
+			hasNotifiedFirstMessageRef.current = true;
+			onFirstMessage();
+		}
+	}, [isNewlyCreated, onFirstMessage, messages.length]);
 
 	useEffect(() => {
 		if (isNearBottom) {
@@ -1019,6 +1038,75 @@ useEffect(() => {
 					</button>
 					<span style={{ display: 'flex', alignItems: 'center', gap: 8, position: 'relative' }}>
 						<span>{room.room_name}</span>
+						<button
+							type="button"
+							className="icon-button"
+							aria-label="Copy room link"
+							title="Copy room link"
+							onClick={() => {
+								const url = `${window.location.origin}/room/${room.id}`;
+								navigator.clipboard.writeText(url).then(() => { /* optional: toast */ }).catch(() => {});
+							}}
+							style={{ padding: 6 }}
+						>
+							<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+								<rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+								<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+							</svg>
+						</button>
+						<button
+							type="button"
+							className="icon-button"
+							aria-label="Show room QR code"
+							title="Show room QR code"
+							onClick={() => setShowQr((v) => !v)}
+							style={{ padding: 6 }}
+						>
+							<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+								<rect x="3" y="3" width="7" height="7" />
+								<rect x="14" y="3" width="7" height="7" />
+								<rect x="3" y="14" width="7" height="7" />
+								<path d="M14 14h3v3h-3zM14 17h3" />
+							</svg>
+						</button>
+						{showQr && (
+							<>
+								<div
+									className="backdrop"
+									style={{ zIndex: 18 }}
+									onClick={() => setShowQr(false)}
+									aria-hidden
+								/>
+								<div
+									className="qr-popover"
+									style={{
+										position: 'absolute',
+										left: 0,
+										top: 40,
+										background: 'var(--wa-panel)',
+										padding: 16,
+										borderRadius: 12,
+										boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
+										zIndex: 20,
+										display: 'flex',
+										flexDirection: 'column',
+										alignItems: 'center',
+										gap: 12
+									}}
+								>
+									<div style={{ fontSize: 13, color: 'var(--wa-muted)', fontWeight: 600 }}>Scan to join room</div>
+									<div style={{ background: '#fff', padding: 10, borderRadius: 8 }}>
+										<QRCodeSVG value={`${ROOM_BASE_URL}/room/${room.id}`} size={180} level="M" />
+									</div>
+									<div style={{ fontSize: 11, color: 'var(--wa-muted)', wordBreak: 'break-all', maxWidth: 200 }}>
+										{ROOM_BASE_URL}/room/{room.id}
+									</div>
+									<button type="button" className="button secondary" onClick={() => setShowQr(false)} style={{ fontSize: 12 }}>
+									Close
+								</button>
+								</div>
+							</>
+						)}
 						{/* Mood selector button */}
 						<button className="icon-button" aria-label="Select mood" onClick={() => setShowMoodPicker((v) => !v)} style={{ padding: 6 }}>
 							<span style={{ fontSize: 18 }}>{mood ?? '🙂'}</span>
@@ -1054,7 +1142,19 @@ useEffect(() => {
 						</span>
 					</div>
 				)}
-				{messages.length === 0 && <div className="empty">Say hi 👋</div>}
+				{messages.length === 0 && isNewlyCreated && (
+					<div className="empty" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16, padding: 24 }}>
+						<div style={{ fontSize: 15, color: 'var(--wa-muted)', fontWeight: 600 }}>Share this QR to invite others</div>
+						<div style={{ background: '#fff', padding: 12, borderRadius: 12 }}>
+							<QRCodeSVG value={`${ROOM_BASE_URL}/room/${room.id}`} size={200} level="M" />
+						</div>
+						<div style={{ fontSize: 12, color: 'var(--wa-muted)', wordBreak: 'break-all', textAlign: 'center', maxWidth: 260 }}>
+							{ROOM_BASE_URL}/room/{room.id}
+						</div>
+						<div style={{ fontSize: 13, color: 'var(--wa-muted)' }}>Send a message to dismiss</div>
+					</div>
+				)}
+				{messages.length === 0 && !isNewlyCreated && <div className="empty">Say hi 👋</div>}
 				{(() => {
 					const items: JSX.Element[] = [];
 					let lastKey: string | null = null;
@@ -1154,6 +1254,15 @@ export default function App() {
 	const [activeId, setActiveId] = useState<number | null>(null);
 	const [showRooms, setShowRooms] = useState<boolean>(false);
 	const [roomRefreshKey, setRoomRefreshKey] = useState<number>(0);
+	const [pendingRoomJoin, setPendingRoomJoin] = useState<{ room: Room } | null>(null);
+	const [newlyCreatedRoomId, setNewlyCreatedRoomId] = useState<number | null>(null);
+	const navigate = useNavigate();
+	const location = useLocation();
+
+	const roomIdFromUrl = (() => {
+		const m = location.pathname.match(/^\/room\/(\d+)$/);
+		return m ? parseInt(m[1], 10) : null;
+	})();
 
 	useEffect(() => {
 		let mounted = true;
@@ -1161,12 +1270,49 @@ export default function App() {
 		return () => { mounted = false; };
 	}, []);
 
+	// Sync URL to state: set activeId and handle /room/:id (fetch room, join or show password gate)
+	useEffect(() => {
+		if (roomIdFromUrl === null) {
+			setActiveId(null);
+			setPendingRoomJoin(null);
+			return;
+		}
+		setActiveId(roomIdFromUrl);
+		let cancelled = false;
+		(async () => {
+			const existing = rooms.find((r) => r.id === roomIdFromUrl);
+			if (existing) {
+				if (!joinedIds.includes(roomIdFromUrl) && existing.password) {
+					if (!cancelled) setPendingRoomJoin({ room: existing });
+				} else if (!joinedIds.includes(roomIdFromUrl)) {
+					setJoinedIds((prev) => (prev.includes(roomIdFromUrl) ? prev : [...prev, roomIdFromUrl]));
+				}
+				return;
+			}
+			const room = await fetchRoomById(roomIdFromUrl);
+			if (cancelled) return;
+			if (!room) {
+				navigate('/', { replace: true });
+				return;
+			}
+			setRooms((prev) => (prev.some((r) => r.id === room.id) ? prev : [room, ...prev]));
+			if (joinedIds.includes(roomIdFromUrl)) return;
+			if (room.password) {
+				setPendingRoomJoin({ room });
+			} else {
+				setJoinedIds((prev) => (prev.includes(roomIdFromUrl) ? prev : [...prev, roomIdFromUrl]));
+			}
+		})();
+		return () => { cancelled = true; };
+	}, [roomIdFromUrl, location.pathname, rooms, joinedIds]);
+
 	async function handleCreate(name: string, password?: string | null) {
 		try {
 			const room = await createRoom(name, password);
 			setRooms((prev) => [room, ...prev]);
-			setJoinedIds([...joinedIds, room.id]);
-			setActiveId(room.id);
+			setJoinedIds((prev) => [...prev, room.id]);
+			setNewlyCreatedRoomId(room.id);
+			navigate(`/room/${room.id}`);
 		} catch (err: any) {
 			const msg = err?.message || 'Failed to create room';
 			window.alert(msg);
@@ -1184,9 +1330,10 @@ export default function App() {
 				window.alert('Incorrect password');
 				return;
 			}
-			if (!rooms.find((r) => r.id === found.id)) setRooms((prev) => [found, ...prev]);
-			if (!joinedIds.includes(found.id)) setJoinedIds([...joinedIds, found.id]);
-			setActiveId(found.id);
+			setRooms((prev) => (prev.some((r) => r.id === found.id) ? prev : [found, ...prev]));
+			setJoinedIds((prev) => (prev.includes(found.id) ? prev : [...prev, found.id]));
+			setPendingRoomJoin(null);
+			navigate(`/room/${found.id}`);
 		} catch (err: any) {
 			const msg = err?.message || 'Failed to join room';
 			window.alert(msg);
@@ -1197,8 +1344,12 @@ export default function App() {
 		try {
 			await deleteRoom(roomId);
 			setRooms((prev) => prev.filter((r) => r.id !== roomId));
-			setJoinedIds(joinedIds.filter((id) => id !== roomId));
-			if (activeId === roomId) setActiveId(null);
+			setJoinedIds((prev) => prev.filter((id) => id !== roomId));
+			if (activeId === roomId) {
+				setActiveId(null);
+				setPendingRoomJoin(null);
+				navigate('/', { replace: true });
+			}
 		} catch (err: any) {
 			const msg = err?.message || 'Failed to delete room';
 			window.alert(msg);
@@ -1206,18 +1357,18 @@ export default function App() {
 	}
 
 	function handleLeave(roomId: number) {
-		setJoinedIds(joinedIds.filter((id) => id !== roomId));
-		if (activeId === roomId) setActiveId(null);
+		setJoinedIds((prev) => prev.filter((id) => id !== roomId));
+		if (activeId === roomId) {
+			setActiveId(null);
+			setPendingRoomJoin(null);
+			navigate('/', { replace: true });
+		}
 	}
 
 	function handleSelect(room: Room) {
 		if (joinedIds.includes(room.id)) {
-			if (activeId === room.id) {
-				setRoomRefreshKey((v) => v + 1); // force refetch/resubscribe
-			} else {
-				setActiveId(room.id);
-				setRoomRefreshKey((v) => v + 1);
-			}
+			setRoomRefreshKey((v) => v + 1);
+			navigate(`/room/${room.id}`);
 			return;
 		}
 		window.alert('You are not joined to this room');
@@ -1227,7 +1378,9 @@ export default function App() {
 		setUsername('');
 		setJoinedIds([]);
 		setActiveId(null);
+		setPendingRoomJoin(null);
 		setShowRooms(false);
+		navigate('/', { replace: true });
 	}
 
 	if (!username) {
@@ -1235,6 +1388,35 @@ export default function App() {
 	}
 
 	const activeRoom = rooms.find((r) => r.id === activeId) || null;
+
+	// Password gate when opening /room/:id and room is password-protected
+	if (pendingRoomJoin) {
+		const gateRoom = pendingRoomJoin.room;
+		return (
+			<div className="app">
+				<RoomsSidebar
+					rooms={rooms}
+					joinedIds={joinedIds}
+					activeRoomId={null}
+					onSelect={handleSelect}
+					onCreate={handleCreate}
+					onDelete={handleDelete}
+					onLeave={handleLeave}
+					onClose={() => setShowRooms(false)}
+					onJoin={handleJoin}
+					isOpen={showRooms}
+					username={username}
+					onLogout={handleLogout}
+				/>
+				{showRooms && <div className="backdrop" onClick={() => setShowRooms(false)} />}
+				<JoinRoomGate
+					room={gateRoom}
+					onSubmit={(enteredPassword) => handleJoin({ id: gateRoom.id, room_name: gateRoom.room_name, password: enteredPassword.trim() || null } as Room)}
+					onCancel={() => { setPendingRoomJoin(null); navigate('/', { replace: true }); }}
+				/>
+			</div>
+		);
+	}
 
 	return (
 		<div className="app">
@@ -1254,7 +1436,15 @@ export default function App() {
 			/>
 			{showRooms && <div className="backdrop" onClick={() => setShowRooms(false)} />}
 			{activeRoom ? (
-				<ChatView room={activeRoom} me={username} refreshKey={roomRefreshKey} onOpenRooms={() => setShowRooms((v) => !v)} onLogout={handleLogout} />
+				<ChatView
+					room={activeRoom}
+					me={username}
+					refreshKey={roomRefreshKey}
+					onOpenRooms={() => setShowRooms((v) => !v)}
+					onLogout={handleLogout}
+					isNewlyCreated={activeId !== null && newlyCreatedRoomId === activeId}
+					onFirstMessage={() => setNewlyCreatedRoomId(null)}
+				/>
 			) : (
 				<div className="main">
 					<div className="chat-header">
@@ -1273,6 +1463,40 @@ export default function App() {
 					<div className="empty">Join or create a room</div>
 				</div>
 			)}
+		</div>
+	);
+}
+
+function JoinRoomGate({ room, onSubmit, onCancel }: { room: Room; onSubmit: (password: string) => void; onCancel: () => void }) {
+	const [password, setPassword] = useState('');
+	const handleSubmit = (e: React.FormEvent) => {
+		e.preventDefault();
+		onSubmit(password);
+	};
+	return (
+		<div className="main">
+			<div className="chat-header">
+				<span>TalkDrop</span>
+				<button type="button" className="button secondary" onClick={onCancel} aria-label="Cancel">Cancel</button>
+			</div>
+			<div style={{ padding: 24, maxWidth: 360, margin: '0 auto' }}>
+				<h2 style={{ fontSize: 18, marginBottom: 8 }}>Join room: {room.room_name}</h2>
+				<p style={{ color: 'var(--wa-muted)', fontSize: 14, marginBottom: 16 }}>This room is protected. Enter the password to join.</p>
+				<form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+					<input
+						type="password"
+						placeholder="Password"
+						value={password}
+						onChange={(e) => setPassword(e.target.value)}
+						style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid var(--wa-muted)', background: 'var(--wa-panel)', color: 'var(--wa-text)' }}
+						autoFocus
+					/>
+					<div style={{ display: 'flex', gap: 8 }}>
+						<button type="submit" className="button">Join</button>
+						<button type="button" className="button secondary" onClick={onCancel}>Cancel</button>
+					</div>
+				</form>
+			</div>
 		</div>
 	);
 } 

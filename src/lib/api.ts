@@ -13,6 +13,12 @@ export async function fetchRoomByName(roomName: string): Promise<Room | null> {
 	return data ?? null;
 }
 
+export async function fetchRoomById(roomId: number): Promise<Room | null> {
+	const { data, error } = await supabase.from('rooms').select('*').eq('id', roomId).maybeSingle();
+	if (error) throw error;
+	return data ?? null;
+}
+
 export async function createRoom(roomName: string, password?: string | null): Promise<Room> {
 	const { data, error } = await supabase
 		.from('rooms')
