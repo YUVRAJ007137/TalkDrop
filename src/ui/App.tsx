@@ -1041,7 +1041,7 @@ useEffect(() => {
 						</svg>
 					</button>
 					<span className="chat-header-title" title={room.room_name}>{room.room_name}</span>
-					<span style={{ display: 'flex', alignItems: 'center', gap: 8, position: 'relative', flexShrink: 0 }}>
+					<span className="chat-header-icons">
 						<button
 							type="button"
 							className="icon-button"

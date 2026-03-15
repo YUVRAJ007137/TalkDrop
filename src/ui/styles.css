@@ -29,8 +29,9 @@
 	.active { @apply bg-[#1f2c33]; }
 	.main { @apply bg-[var(--wa-bg-dark)] flex flex-col min-h-0; }
 	.chat-header { @apply sticky top-0 z-30 px-4 py-3 bg-[var(--wa-panel-light)] font-semibold flex items-center justify-between gap-2; flex-wrap: nowrap; min-height: 52px; }
-	.chat-header-left { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8; overflow: hidden; }
+	.chat-header-left { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8; overflow: visible; }
 	.chat-header-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 1; min-width: 0; }
+	.chat-header-icons { flex-shrink: 0; display: flex; align-items: center; gap: 8; position: relative; }
 	.chat-header-actions { flex-shrink: 0; display: flex; align-items: center; gap: 8; }
 	/* Improve mobile visibility and avoid notch overlap */
 	.chat-header { top: env(safe-area-inset-top, 0px); z-index: 50; padding-top: calc(env(safe-area-inset-top, 0px) + 0.75rem); }
@@ -50,7 +51,7 @@
 	.button { @apply bg-[var(--wa-accent-dark)] text-white px-4 py-2 rounded-lg cursor-pointer; }
 	.button.secondary { @apply bg-[var(--wa-panel-light)]; }
 	.button.danger { @apply bg-[#d9534f]; }
-	.icon-button { @apply p-2 rounded-md bg-[var(--wa-panel-light)] text-[var(--wa-text)] border-0; }
+	.icon-button { @apply p-2 rounded-md bg-[var(--wa-panel-light)] text-[var(--wa-text)] border-0 cursor-pointer; }
 	.empty { @apply text-center text-[var(--wa-muted)] p-6; }
 	.day-separator { @apply mx-auto my-2 px-3 py-1 text-xs text-[var(--wa-muted)] bg-[var(--wa-panel-light)] rounded-full; }
 	.file-thumb { @apply max-w-[280px] rounded-lg block; }
@@ -80,10 +81,11 @@
 		.button.danger { @apply px-2 py-1; }
 		.chat-header { @apply px-2 py-2 gap-1; min-height: 48px; }
 		.chat-header-left { gap: 4; }
-		.chat-header .icon-button { padding: 4px !important; min-width: 32px; min-height: 32px; }
-		.chat-header .icon-button svg { width: 16px; height: 16px; }
-		.chat-header-title { font-size: 0.9375rem; }
+		.chat-header .icon-button { padding: 6px !important; min-width: 36px; min-height: 36px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+		.chat-header .icon-button svg { width: 18px; height: 18px; flex-shrink: 0; }
+		.chat-header-title { font-size: 0.9375rem; max-width: 140px; }
 		.chat-header-actions .my-mood { display: none; }
+		.chat-header-actions .button.secondary { min-width: 0; }
 		.onboard { @apply mt-8 p-4 max-w-[95vw]; }
 		.onboard h1 { @apply text-lg; }
 	}
@@ -103,11 +105,11 @@
 		.file-thumb { @apply max-w-[200px]; }
 		.messages { @apply p-2 pb-16; }
 		.chat-header { @apply px-2 py-1.5; min-height: 44px; }
-		.chat-header-left { gap: 2; }
-		.chat-header .icon-button { padding: 4px !important; min-width: 28px; min-height: 28px; }
-		.chat-header .icon-button svg { width: 14px; height: 14px; }
-		.chat-header-title { font-size: 0.875rem; }
-		.chat-header .button.secondary { padding: 4px 8px; font-size: 0.75rem; }
+		.chat-header-left { gap: 4; }
+		.chat-header .icon-button { padding: 6px !important; min-width: 36px; min-height: 36px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+		.chat-header .icon-button svg { width: 16px; height: 16px; flex-shrink: 0; }
+		.chat-header-title { font-size: 0.875rem; max-width: 100px; }
+		.chat-header .button.secondary { padding: 6px 10px; font-size: 0.8125rem; min-width: 0; }
 	}
 } 
 .spinner { @apply w-4 h-4 border-2 border-white border-opacity-30 border-t-white rounded-full animate-spin; }
